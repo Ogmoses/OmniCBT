@@ -412,8 +412,8 @@ function parseExtractedJSON(raw){
   return parsed;
 }
 
-/* Merge multiple extracted banks (one per batch) into a single question bank,
-   renumbering ids so batches never collide. */
+/* Combine the results read from each group of pages into one single
+   question bank, and renumber question ids so nothing collides. */
 function mergeBanks(banks){
   const title = banks.find(b=>b.title)?.title || "Extracted question bank";
   const availableSubjects = [...new Set(banks.flatMap(b=>b.availableSubjects||[]))];
@@ -429,7 +429,7 @@ function chunk(arr, size){
 }
 
 /* Render PDF pages to base64 JPEG images (and extract their text) using pdf.js */
-async function pdfToPages(file, onProgress, maxPages = 60){
+async function pdfToPages(file, onProgress, maxPages = 200){
   const arrayBuffer = await file.arrayBuffer();
   window.pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
   const pdf = await window.pdfjsLib.getDocument({ data: arrayBuffer }).promise;
@@ -606,17 +606,17 @@ function SettingsModal({ state, setState, onClose, push }){
         </div>
 
         <div className="mb-2 pt-4" style={{ borderTop:"1px solid var(--rule)" }}>
-          <div className="serif font-bold text-[15px] mb-0.5">Extraction settings</div>
-          <p className="text-xs mb-4" style={{ color:"var(--ink-soft)" }}>Choose who reads your PDFs and how aggressively the pages are sampled.</p>
+          <div className="serif font-bold text-[15px] mb-0.5">Reading settings</div>
+          <p className="text-xs mb-4" style={{ color:"var(--ink-soft)" }}>How the app works through your PDF.</p>
         </div>
 
         <div className="mb-1.5">
-          <label className="text-xs font-semibold uppercase tracking-wide" style={{ color:"var(--ink-soft)" }}>Pages per request</label>
+          <label className="text-xs font-semibold uppercase tracking-wide" style={{ color:"var(--ink-soft)" }}>How many pages to read at once</label>
           <select value={pagesPerRequest} onChange={e=>setPagesPerRequest(Number(e.target.value))}
             className="mt-2 w-full px-3 py-2.5 rounded-lg text-sm bg-transparent" style={{ border:"1px solid var(--rule)" }}>
             {[1,2,4,6,10,20].map(n => <option key={n} value={n}>{n} page{n>1?"s":""}</option>)}
           </select>
-          <p className="text-xs mt-1.5" style={{ color:"var(--ink-soft)" }}>Smaller batches are slower but survive long papers.</p>
+          <p className="text-xs mt-1.5" style={{ color:"var(--ink-soft)" }}>The app sends your PDF to the AI in small groups of pages instead of all at once. A lower number is slower overall, but if one group has a problem, only that small group is affected — not the whole document.</p>
         </div>
 
         <button type="button" onClick={()=>setSendPageImages(v=>!v)}
@@ -714,22 +714,40 @@ function UploadScreen({ state, setState, push }){
     try{
       setStage("Reading PDF pages...");
       const pages = await pdfToPages(file, (i,total)=> setStage(`Reading page ${i} of ${total}...`));
-      const batchSize = Math.max(1, Number(state.pagesPerRequest) || 4);
-      const batches = chunk(pages, batchSize);
+      const groupSize = Math.max(1, Number(state.pagesPerRequest) || 4);
+      const groups = chunk(pages, groupSize);
       const results = [];
-      for(let b=0; b<batches.length; b++){
-        setStage(batches.length > 1
-          ? `AI scanning batch ${b+1} of ${batches.length}...`
-          : "AI scanning questions & diagram structures...");
-        const raw = state.provider === "openai"
-          ? await callOpenAI({ apiKey: state.apiKey, model: state.model, pages: batches[b], sendImages: state.sendPageImages !== false })
-          : await callGemini({ apiKey: state.apiKey, model: state.model, pages: batches[b], sendImages: state.sendPageImages !== false });
-        results.push(parseExtractedJSON(raw));
+      const skipped = [];
+      for(let g=0; g<groups.length; g++){
+        setStage(groups.length > 1
+          ? `Scanning questions (part ${g+1} of ${groups.length})...`
+          : "Scanning questions & diagrams...");
+        // If the AI can't make sense of one small group of pages (e.g. a mostly-
+        // blank divider page), skip just that group instead of losing everything.
+        try{
+          const raw = state.provider === "openai"
+            ? await callOpenAI({ apiKey: state.apiKey, model: state.model, pages: groups[g], sendImages: state.sendPageImages !== false })
+            : await callGemini({ apiKey: state.apiKey, model: state.model, pages: groups[g], sendImages: state.sendPageImages !== false });
+          results.push(parseExtractedJSON(raw));
+        }catch(groupErr){
+          console.error(`Pages ${groups[g][0].pageNumber}-${groups[g][groups[g].length-1].pageNumber} failed:`, groupErr);
+          const pageRange = groups[g].length > 1
+            ? `pages ${groups[g][0].pageNumber}–${groups[g][groups[g].length-1].pageNumber}`
+            : `page ${groups[g][0].pageNumber}`;
+          skipped.push({ range: pageRange, message: groupErr.message || "unknown problem" });
+        }
       }
-      setStage("Indexing subjects and years...");
+      if(results.length === 0){
+        throw new Error(`Couldn't read any pages successfully. First problem: ${skipped[0]?.message || "unknown"}`);
+      }
+      setStage("Sorting questions by subject and year...");
       const bank = mergeBanks(results);
       setState(s=>({ ...s, bank }));
-      push(`Extracted ${bank.questions.length} questions${batches.length>1 ? ` across ${batches.length} batches` : ""}`, { tone:"save" });
+      if(skipped.length > 0){
+        push(`Found ${bank.questions.length} questions — had trouble with ${skipped.map(f=>f.range).join(", ")}, so those were skipped`, { tone:"save", duration: 5000 });
+      }else{
+        push(`Found ${bank.questions.length} questions`, { tone:"save" });
+      }
     }catch(e){
       console.error(e);
       setError(e.message || "Extraction failed. Check your API key and try again.");
@@ -779,7 +797,7 @@ function UploadScreen({ state, setState, push }){
               <Icon name="upload" size={24} />
             </div>
             <div className="serif font-bold text-[17px]">Drop a past-question PDF here</div>
-            <div className="text-[13px] mt-1.5" style={{ color:"var(--ink-soft)" }}>or click to browse · .pdf only · stays on your device until a batch is sent for reading</div>
+            <div className="text-[13px] mt-1.5" style={{ color:"var(--ink-soft)" }}>or click to browse · .pdf only · stays on your device until it's sent off to be read</div>
           </div>
 
           {error && (
