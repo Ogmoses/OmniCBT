@@ -373,7 +373,7 @@ async function callOpenAI({ apiKey, model, pages, sendImages }){
 }
 
 async function callGemini({ apiKey, model, pages, sendImages }){
-  const m = model || "gemini-1.5-flash";
+  const m = model || "gemini-2.5-flash";
   const parts = [
     { text: sendImages
       ? SYSTEM_PROMPT
@@ -509,14 +509,19 @@ function Modal({ children, onClose, wide }){
 
 function SettingsModal({ state, setState, onClose, push }){
   const [apiKey, setApiKey] = useState(state.apiKey);
+  const modelsFor = (p) => p === "openai" ? ["gpt-4o-mini","gpt-4o"] : ["gemini-2.5-flash","gemini-2.5-pro"];
+
   const [provider, setProvider] = useState(state.provider);
-  const [model, setModel] = useState(state.model);
+  // If a model saved from an older version of this app (e.g. a retired
+  // Gemini model name) is no longer in our list, quietly fall back to the
+  // first valid option instead of carrying a broken value forward.
+  const [model, setModel] = useState(
+    modelsFor(state.provider).includes(state.model) ? state.model : modelsFor(state.provider)[0]
+  );
   const [showHelp, setShowHelp] = useState(false);
   const [pagesPerRequest, setPagesPerRequest] = useState(state.pagesPerRequest || 4);
   const [sendPageImages, setSendPageImages] = useState(state.sendPageImages !== false);
   const [confirmWipe, setConfirmWipe] = useState(false);
-
-  const modelsFor = (p) => p === "openai" ? ["gpt-4o-mini","gpt-4o"] : ["gemini-1.5-flash","gemini-1.5-pro"];
 
   const helpFor = (p) => p === "openai"
     ? { url:"https://platform.openai.com/api-keys", host:"platform.openai.com", note:"Requires billing set up on your OpenAI account — usage is billed per request, typically a few cents per PDF." }
@@ -1372,7 +1377,14 @@ function ResultsScreen({ state, setState, result, push }){
 /* ============================== APP ============================== */
 
 function App(){
-  const [state, setState] = useState(()=> loadState() || defaultState());
+  const [state, setState] = useState(()=> {
+    const loaded = loadState() || defaultState();
+    // Migrate any model name from an older version of this app that a
+    // provider has since retired, so a stale save never silently fails.
+    const RETIRED_MODELS = { "gemini-1.5-flash":"gemini-2.5-flash", "gemini-1.5-pro":"gemini-2.5-pro" };
+    if(RETIRED_MODELS[loaded.model]) loaded.model = RETIRED_MODELS[loaded.model];
+    return loaded;
+  });
   const [showSettings, setShowSettings] = useState(false);
   const [showResume, setShowResume] = useState(false);
   const [lastResult, setLastResult] = useState(null);
