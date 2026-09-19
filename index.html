@@ -189,7 +189,9 @@ const SYSTEM_PROMPT = `Analyze the provided PDF content. Extract all multiple-ch
     }
   ]
 }
-If the answer key is at the end of the document, cross-reference question numbers to ensure correct mapping. If no answer key exists, solve the questions and generate accurate explanations. Respond with ONLY the JSON object, no markdown fences, no commentary.`;
+If the answer key is at the end of the document, cross-reference question numbers to ensure correct mapping. If no answer key exists, solve the questions and generate accurate explanations.
+Note: this is one small slice of a larger document. A subject or year heading (e.g. "PHYSICS", "2021") may have appeared on an earlier page not included here and may not repeat on every page. If a page in this slice doesn't explicitly restate the subject or year, infer the most likely one from context (topic, terminology, question numbering continuing from a prior page) rather than leaving it blank or defaulting to whatever subject you extracted most recently without checking if it still fits.
+Respond with ONLY the JSON object, no markdown fences, no commentary.`;
 
 const SAMPLE_BANK = {
   title: "Sample Past Questions — General Science (2019–2021)",
@@ -230,9 +232,31 @@ function defaultState(){
     pagesPerRequest: 4, sendPageImages: true,
     theme: "light",
     bank: null,
+    savedBanks: [],
     history: [],
     activeTest: null
   };
+}
+
+/* Keep a small library of already-extracted papers so a PDF never has to be
+   re-read from scratch. Newest first, capped so local storage doesn't grow
+   without bound. */
+function saveBankToHistory(savedBanks, bank, sourceName){
+  const entry = {
+    id: uid(),
+    savedAt: Date.now(),
+    sourceName: sourceName || "Untitled PDF",
+    bank
+  };
+  return [entry, ...(savedBanks || [])].slice(0, 10);
+}
+function timeAgo(ts){
+  const s = Math.floor((Date.now() - ts) / 1000);
+  if(s < 60) return "just now";
+  const m = Math.floor(s/60); if(m < 60) return `${m}m ago`;
+  const h = Math.floor(m/60); if(h < 24) return `${h}h ago`;
+  const d = Math.floor(h/24); if(d < 30) return `${d}d ago`;
+  return new Date(ts).toLocaleDateString();
 }
 
 /* ============================== HELPERS ============================== */
@@ -454,8 +478,46 @@ function chunk(arr, size){
   return out;
 }
 
-/* Render PDF pages to base64 JPEG images (and extract their text) using pdf.js */
-async function pdfToPages(file, onProgress, maxPages = 200){
+/* Run several async jobs at once (instead of one after another), capped at
+   `limit` in flight at a time, so a 79-page PDF isn't waiting on 20 network
+   round-trips in a strict single-file line. `onSettle` fires as each job
+   finishes (in whatever order it happens to complete) so progress can update
+   live rather than only at the very end. */
+async function runPool(items, limit, worker, onSettle){
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  let doneCount = 0;
+  async function runner(){
+    while(nextIndex < items.length){
+      const i = nextIndex++;
+      try{
+        results[i] = { ok:true, value: await worker(items[i], i) };
+      }catch(e){
+        results[i] = { ok:false, error:e };
+      }
+      doneCount++;
+      onSettle && onSettle(doneCount, items.length);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, runner));
+  return results;
+}
+
+/* Retry a flaky call once before giving up — a lot of "batch failed" cases
+   are just a transient network hiccup or a momentary bad response, not a
+   real, permanent problem with those pages. */
+async function withRetry(fn, retries = 1){
+  let lastErr;
+  for(let attempt=0; attempt <= retries; attempt++){
+    try{ return await fn(); }
+    catch(e){ lastErr = e; }
+  }
+  throw lastErr;
+}
+
+/* Render PDF pages to base64 JPEG images (and extract their text) using pdf.js.
+   Skips the (slow) canvas rendering entirely when images won't be sent anyway. */
+async function pdfToPages(file, onProgress, maxPages = 200, renderImages = true){
   const arrayBuffer = await file.arrayBuffer();
   window.pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
   const pdf = await window.pdfjsLib.getDocument({ data: arrayBuffer }).promise;
@@ -463,12 +525,15 @@ async function pdfToPages(file, onProgress, maxPages = 200){
   const pages = [];
   for(let i=1;i<=total;i++){
     const page = await pdf.getPage(i);
-    const viewport = page.getViewport({ scale: 1.6 });
-    const canvas = document.createElement("canvas");
-    canvas.width = viewport.width; canvas.height = viewport.height;
-    const ctx = canvas.getContext("2d");
-    await page.render({ canvasContext: ctx, viewport }).promise;
-    const image = canvas.toDataURL("image/jpeg", 0.82);
+    let image = null;
+    if(renderImages){
+      const viewport = page.getViewport({ scale: 1.6 });
+      const canvas = document.createElement("canvas");
+      canvas.width = viewport.width; canvas.height = viewport.height;
+      const ctx = canvas.getContext("2d");
+      await page.render({ canvasContext: ctx, viewport }).promise;
+      image = canvas.toDataURL("image/jpeg", 0.82);
+    }
     let text = "";
     try{
       const textContent = await page.getTextContent();
@@ -786,43 +851,54 @@ function UploadScreen({ state, setState, push }){
   const [processing, setProcessing] = useState(false);
   const [stage, setStage] = useState("");
   const [error, setError] = useState("");
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   const inputRef = useRef(null);
 
   const startExtraction = async (file) => {
     if(!state.apiKey){ setError("Add your API key first (top right) — it's needed to read the PDF."); return; }
     setError(""); setProcessing(true);
     try{
+      const sendImages = state.sendPageImages !== false;
       setStage("Reading PDF pages...");
-      const pages = await pdfToPages(file, (i,total)=> setStage(`Reading page ${i} of ${total}...`));
+      const pages = await pdfToPages(file, (i,total)=> setStage(`Reading page ${i} of ${total}...`), 200, sendImages);
       const groupSize = Math.max(1, Number(state.pagesPerRequest) || 4);
       const groups = chunk(pages, groupSize);
-      const results = [];
       const skipped = [];
-      for(let g=0; g<groups.length; g++){
-        setStage(groups.length > 1
-          ? `Scanning questions (part ${g+1} of ${groups.length})...`
-          : "Scanning questions & diagrams...");
-        // If the AI can't make sense of one small group of pages (e.g. a mostly-
-        // blank divider page), skip just that group instead of losing everything.
-        try{
+
+      // Read up to 3 groups of pages at the same time instead of one after
+      // another — this is the single biggest lever on wall-clock time for a
+      // long document. Each group also gets one automatic retry before it's
+      // counted as a real failure, since a lot of failures are transient.
+      const CONCURRENCY = 3;
+      const settled = await runPool(groups, CONCURRENCY, async (group) => {
+        return withRetry(async () => {
           const raw = state.provider === "openai"
-            ? await callOpenAI({ apiKey: state.apiKey, model: state.model, pages: groups[g], sendImages: state.sendPageImages !== false })
-            : await callGemini({ apiKey: state.apiKey, model: state.model, pages: groups[g], sendImages: state.sendPageImages !== false });
-          results.push(parseExtractedJSON(raw));
-        }catch(groupErr){
-          console.error(`Pages ${groups[g][0].pageNumber}-${groups[g][groups[g].length-1].pageNumber} failed:`, groupErr);
+            ? await callOpenAI({ apiKey: state.apiKey, model: state.model, pages: group, sendImages })
+            : await callGemini({ apiKey: state.apiKey, model: state.model, pages: group, sendImages });
+          return parseExtractedJSON(raw);
+        }, 1);
+      }, (done, total) => {
+        setStage(total > 1 ? `Scanning questions (${done} of ${total} parts done)...` : "Scanning questions & diagrams...");
+      });
+
+      const results = [];
+      settled.forEach((s, g) => {
+        if(s.ok){ results.push(s.value); }
+        else{
+          console.error(`Pages ${groups[g][0].pageNumber}-${groups[g][groups[g].length-1].pageNumber} failed:`, s.error);
           const pageRange = groups[g].length > 1
             ? `pages ${groups[g][0].pageNumber}–${groups[g][groups[g].length-1].pageNumber}`
             : `page ${groups[g][0].pageNumber}`;
-          skipped.push({ range: pageRange, message: groupErr.message || "unknown problem" });
+          skipped.push({ range: pageRange, message: s.error?.message || "unknown problem" });
         }
-      }
+      });
+
       if(results.length === 0){
         throw new Error(`Couldn't read any pages successfully. First problem: ${skipped[0]?.message || "unknown"}`);
       }
       setStage("Sorting questions by subject and year...");
       const bank = mergeBanks(results);
-      setState(s=>({ ...s, bank }));
+      setState(s=>({ ...s, bank, savedBanks: saveBankToHistory(s.savedBanks, bank, file.name) }));
       if(skipped.length > 0){
         push(`Found ${bank.questions.length} questions — had trouble with ${skipped.map(f=>f.range).join(", ")}, so those were skipped`, { tone:"save", duration: 5000 });
       }else{
@@ -847,6 +923,15 @@ function UploadScreen({ state, setState, push }){
   const useSample = () => {
     setState(s=>({ ...s, bank: SAMPLE_BANK }));
     push("Loaded sample question bank", { tone:"save" });
+  };
+
+  const useSavedBank = (entry) => {
+    setState(s=>({ ...s, bank: entry.bank }));
+    push(`Loaded "${entry.bank.title}"`, { tone:"save" });
+  };
+  const deleteSavedBank = (id) => {
+    setState(s=>({ ...s, savedBanks: (s.savedBanks || []).filter(e => e.id !== id) }));
+    setConfirmDeleteId(null);
   };
 
   return (
@@ -889,6 +974,42 @@ function UploadScreen({ state, setState, push }){
           <button onClick={useSample} className="mt-5 px-4 py-2.5 rounded-xl text-sm font-semibold inline-flex items-center gap-2 transition hover:opacity-85" style={{ border:"1px solid var(--rule)", background:"var(--paper-raised)" }}>
             <Icon name="flask-conical" size={15} /> Try with sample data
           </button>
+
+          {state.savedBanks && state.savedBanks.length > 0 && (
+            <div className="mt-8">
+              <div className="text-xs font-semibold uppercase tracking-wide mb-3 flex items-center gap-1.5" style={{ color:"var(--ink-soft)" }}>
+                <Icon name="history" size={12} /> Papers you've already read — no need to upload again
+              </div>
+              <div className="space-y-2">
+                {state.savedBanks.map(entry=>(
+                  <div key={entry.id} className="card rounded-xl p-3.5 flex items-center gap-3">
+                    <div className="w-9 h-9 rounded-lg flex items-center justify-center shrink-0" style={{ background:"var(--gold-soft)", color:"var(--gold)" }}>
+                      <Icon name="file-check-2" size={15} />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="font-semibold text-[13.5px] truncate">{entry.bank.title || entry.sourceName}</div>
+                      <div className="text-[11.5px] mt-0.5" style={{ color:"var(--ink-soft)" }}>
+                        {entry.bank.questions.length} questions · {entry.bank.availableSubjects.length} subjects · {timeAgo(entry.savedAt)}
+                      </div>
+                    </div>
+                    {confirmDeleteId === entry.id ? (
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button onClick={()=>deleteSavedBank(entry.id)} className="text-xs font-semibold px-2.5 py-1.5 rounded-lg" style={{ background:"var(--wrong)", color:"#fff" }}>Delete</button>
+                        <button onClick={()=>setConfirmDeleteId(null)} className="text-xs px-2.5 py-1.5 rounded-lg" style={{ border:"1px solid var(--rule)" }}>Cancel</button>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button onClick={()=>useSavedBank(entry)} className="text-xs font-semibold px-3 py-1.5 rounded-lg" style={{ background:"var(--ink)", color:"var(--paper)" }}>Use</button>
+                        <button onClick={()=>setConfirmDeleteId(entry.id)} aria-label="Delete" className="w-7 h-7 rounded-lg flex items-center justify-center hover:opacity-70" style={{ color:"var(--ink-soft)" }}>
+                          <Icon name="trash-2" size={14} />
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </>
       ) : (
         <div className="rounded-2xl p-14 text-center card">
