@@ -45,15 +45,16 @@
     --paper-raised:#FFFFFF;
     --ink: #1C2541;
     --ink-soft:#5B6478;
-    --rule: #DED6C3;
-    --gold:#B08D3E;
-    --gold-soft:#EFE4C6;
+    --rule: #E3DFD2;
+    --gold:#1F6E5C;
+    --gold-soft:#DCEEE8;
     --correct:#2E6B4F;
     --correct-soft:#E3F0E7;
     --wrong:#B0413E;
     --wrong-soft:#F6E3E1;
     --flag:#B08D3E;
     --flag-soft:#FBF0D9;
+    --dot: rgba(28,37,65,0.07);
   }
   :root[data-theme="dark"]{
     --paper:#14181F;
@@ -61,23 +62,29 @@
     --ink:#EDEAE0;
     --ink-soft:#9CA3B5;
     --rule:#2C3341;
-    --gold:#D6B15C;
-    --gold-soft:#332B16;
+    --gold:#4FBFA0;
+    --gold-soft:#163430;
     --correct:#5FBF8E;
     --correct-soft:#173225;
     --wrong:#E27E7A;
     --wrong-soft:#33191A;
     --flag:#D6B15C;
     --flag-soft:#332B16;
+    --dot: rgba(237,234,224,0.06);
   }
   @media (prefers-color-scheme: dark){
     :root:not([data-theme="light"]){
       --paper:#14181F; --paper-raised:#1B212B; --ink:#EDEAE0; --ink-soft:#9CA3B5;
-      --rule:#2C3341; --gold:#D6B15C; --gold-soft:#332B16; --correct:#5FBF8E;
+      --rule:#2C3341; --gold:#4FBFA0; --gold-soft:#163430; --correct:#5FBF8E;
       --correct-soft:#173225; --wrong:#E27E7A; --wrong-soft:#33191A; --flag:#D6B15C; --flag-soft:#332B16;
+      --dot: rgba(237,234,224,0.06);
     }
   }
-  html,body{ background:var(--paper); color:var(--ink); font-family:'Inter',sans-serif; }
+  html,body{
+    background-color:var(--paper); color:var(--ink); font-family:'Inter',sans-serif;
+    background-image: radial-gradient(var(--dot) 1.1px, transparent 1.1px);
+    background-size: 18px 18px;
+  }
   body{ margin:0; }
   .serif{ font-family:'Source Serif 4', serif; }
   .mono{ font-family:'JetBrains Mono', monospace; }
@@ -424,13 +431,10 @@ function Header({ state, setState, onOpenSettings, autosaveTick }){
     <header className="sticky top-0 z-40 border-b rule" style={{ background:"var(--paper)" }}>
       <div className="max-w-6xl mx-auto px-5 py-3.5 flex items-center justify-between gap-3">
         <div className="flex items-center gap-2.5">
-          <div className="w-8 h-8 rounded-md flex items-center justify-center" style={{ background:"var(--gold-soft)", color:"var(--gold)" }}>
-            <Icon name="scroll-text" size={17} />
+          <div className="w-8 h-8 rounded-lg flex items-center justify-center serif font-bold text-[17px]" style={{ background:"var(--gold)", color:"#fff" }}>
+            Ω
           </div>
-          <div>
-            <div className="serif font-semibold text-[17px] leading-none tracking-tight">{APP_NAME}</div>
-            <div className="text-[10.5px] uppercase tracking-wider mt-1" style={{ color:"var(--ink-soft)" }}>Past questions, reborn as CBT</div>
-          </div>
+          <div className="serif font-bold text-[17px] leading-none tracking-tight">{APP_NAME}</div>
         </div>
 
         <div className="flex items-center gap-2">
@@ -444,9 +448,9 @@ function Header({ state, setState, onOpenSettings, autosaveTick }){
             <Icon name={state.theme === "dark" ? "sun" : "moon"} size={14} />
           </button>
           <button onClick={onOpenSettings}
-            className="flex items-center gap-1.5 text-[12px] font-medium px-3 py-1.5 rounded-full transition hover:opacity-85"
+            className="flex items-center gap-1.5 text-[12px] font-semibold px-3 py-1.5 rounded-full transition hover:opacity-85"
             style={{ background: apiReady ? "var(--correct-soft)" : "var(--wrong-soft)", color: apiReady ? "var(--correct)" : "var(--wrong)" }}>
-            <span className="w-1.5 h-1.5 rounded-full" style={{ background: apiReady ? "var(--correct)" : "var(--wrong)" }}></span>
+            <Icon name={apiReady ? "shield-check" : "shield-alert"} size={12} />
             {apiReady ? "API Ready" : "Set API Key"}
           </button>
         </div>
@@ -611,11 +615,18 @@ function UploadScreen({ state, setState, push }){
   };
 
   return (
-    <div className="max-w-2xl mx-auto px-5 py-14 fade-up">
-      <div className="text-center mb-9">
-        <h1 className="serif text-[34px] leading-tight font-semibold tracking-tight">Turn past questions into<br/>a real practice exam</h1>
-        <p className="mt-3 text-[15px]" style={{ color:"var(--ink-soft)" }}>Upload a past-question PDF. We'll read every page and build a question bank you can sit like the real thing.</p>
+    <div className="max-w-xl mx-auto px-5 py-12 fade-up">
+      <div className="inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide px-3 py-1.5 rounded-full mb-5"
+        style={{ background:"var(--gold-soft)", color:"var(--gold)" }}>
+        <Icon name="file-text" size={12} /> PDF in · Exam out
       </div>
+
+      <h1 className="serif text-[36px] sm:text-[42px] leading-[1.08] font-bold tracking-tight mb-4">
+        Your past-question PDFs,<br/>rebuilt as a real CBT.
+      </h1>
+      <p className="text-[15px] leading-relaxed mb-8" style={{ color:"var(--ink-soft)" }}>
+        Drop in a past paper and {APP_NAME} lifts out every question, option, answer key and worked explanation — then hands you a timed exam hall with a navigation palette, review flags and a marked script at the end. Everything is written to this browser as you go, so a refresh never costs you a session.
+      </p>
 
       {!processing ? (
         <>
@@ -627,11 +638,11 @@ function UploadScreen({ state, setState, push }){
             className="rounded-2xl p-12 text-center cursor-pointer transition"
             style={{ border: `2px dashed ${dragOver ? "var(--gold)" : "var(--rule)"}`, background: dragOver ? "var(--gold-soft)" : "var(--paper-raised)" }}>
             <input ref={inputRef} type="file" accept="application/pdf" className="hidden" onChange={e=>onFile(e.target.files?.[0])} />
-            <div className="w-12 h-12 rounded-full mx-auto flex items-center justify-center mb-4" style={{ background:"var(--gold-soft)", color:"var(--gold)" }}>
-              <Icon name="upload-cloud" size={22} />
+            <div className="w-14 h-14 rounded-2xl mx-auto flex items-center justify-center mb-4" style={{ background:"var(--gold-soft)", color:"var(--gold)" }}>
+              <Icon name="upload" size={24} />
             </div>
-            <div className="font-semibold text-[15px]">Drop your PDF here, or click to browse</div>
-            <div className="text-xs mt-1.5" style={{ color:"var(--ink-soft)" }}>Multiple-choice past questions, any subject, any year</div>
+            <div className="serif font-bold text-[17px]">Drop a past-question PDF here</div>
+            <div className="text-[13px] mt-1.5" style={{ color:"var(--ink-soft)" }}>or click to browse · .pdf only · stays on your device until a batch is sent for reading</div>
           </div>
 
           {error && (
@@ -640,13 +651,7 @@ function UploadScreen({ state, setState, push }){
             </div>
           )}
 
-          <div className="mt-6 flex items-center gap-3">
-            <div className="h-px flex-1" style={{ background:"var(--rule)" }}></div>
-            <span className="text-xs" style={{ color:"var(--ink-soft)" }}>or</span>
-            <div className="h-px flex-1" style={{ background:"var(--rule)" }}></div>
-          </div>
-
-          <button onClick={useSample} className="mt-6 w-full py-3 rounded-xl text-sm font-semibold flex items-center justify-center gap-2 transition hover:opacity-85" style={{ border:"1px solid var(--rule)" }}>
+          <button onClick={useSample} className="mt-5 px-4 py-2.5 rounded-xl text-sm font-semibold inline-flex items-center gap-2 transition hover:opacity-85" style={{ border:"1px solid var(--rule)", background:"var(--paper-raised)" }}>
             <Icon name="flask-conical" size={15} /> Try with sample data
           </button>
         </>
@@ -660,6 +665,36 @@ function UploadScreen({ state, setState, push }){
           <div className="text-xs mt-1.5" style={{ color:"var(--ink-soft)" }}>This can take a minute for longer documents</div>
         </div>
       )}
+
+      <div className="card rounded-2xl p-6 mt-9">
+        <div className="serif font-bold text-[16px] mb-4">What comes out the other side</div>
+        <div className="space-y-4">
+          {[
+            { icon:"timer", title:"Exam Mode", desc:"Countdown clock, palette navigation, answers sealed until you submit, full marked report after." },
+            { icon:"book-open-check", title:"Study Mode", desc:"Count-up timer, instant right/wrong, and the worked explanation one tap below each option list." },
+            { icon:"layers", title:"Filtered papers", desc:"Pick subjects, pick years, pick how many questions — the engine builds that paper on demand." }
+          ].map(f=>(
+            <div key={f.title} className="flex items-start gap-3.5">
+              <div className="w-9 h-9 rounded-xl flex items-center justify-center shrink-0" style={{ background:"var(--gold-soft)", color:"var(--gold)" }}>
+                <Icon name={f.icon} size={16} />
+              </div>
+              <div>
+                <div className="font-semibold text-[14px]">{f.title}</div>
+                <div className="text-[13px] mt-0.5 leading-snug" style={{ color:"var(--ink-soft)" }}>{f.desc}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="rounded-2xl p-5 mt-5" style={{ border:"1px dashed var(--rule)" }}>
+        <div className="flex items-center gap-2 font-semibold text-[13.5px] mb-1.5" style={{ color:"var(--ink-soft)" }}>
+          <Icon name="arrow-right" size={13} /> A note on accuracy
+        </div>
+        <p className="text-[13px] leading-relaxed" style={{ color:"var(--ink-soft)" }}>
+          When a paper carries no answer key, the model solves the questions itself. Treat those explanations as a strong first draft, not a marking scheme — Study Mode is the place to sanity-check them.
+        </p>
+      </div>
     </div>
   );
 }
