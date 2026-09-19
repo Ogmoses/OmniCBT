@@ -6,6 +6,15 @@
 <title>OmniCBT — Past Questions to CBT</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📝</text></svg>">
 
+<!-- Script load diagnostics: tracks every external resource so we can tell
+     you exactly which one your network is blocking, instead of a generic
+     "Script error." -->
+<script>
+  window.__loadStatus = {};
+  window.__markLoad = function(id){ window.__loadStatus[id] = "ok"; };
+  window.__markFail = function(id, src){ window.__loadStatus[id] = "FAILED: " + src; window.__renderDiagnostics && window.__renderDiagnostics(); };
+</script>
+
 <!-- Fonts -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -13,22 +22,22 @@
 
 <!-- KaTeX -->
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js" crossorigin="anonymous"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/contrib/auto-render.min.js" crossorigin="anonymous"></script>
+<script id="lib-katex" src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js" onload="__markLoad('katex')" onerror="__markFail('katex', this.src)"></script>
+<script id="lib-katex-auto" src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/contrib/auto-render.min.js" onload="__markLoad('katex-auto')" onerror="__markFail('katex-auto', this.src)"></script>
 
 <!-- PDF.js -->
-<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js" crossorigin="anonymous"></script>
+<script id="lib-pdfjs" src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js" onload="__markLoad('pdfjs')" onerror="__markFail('pdfjs', this.src)"></script>
 
 <!-- React -->
-<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin="anonymous"></script>
-<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
-<script src="https://unpkg.com/@babel/standalone/babel.min.js" crossorigin="anonymous"></script>
+<script id="lib-react" src="https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js" onload="__markLoad('react')" onerror="__markFail('react', this.src)"></script>
+<script id="lib-reactdom" src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js" onload="__markLoad('react-dom')" onerror="__markFail('react-dom', this.src)"></script>
+<script id="lib-babel" src="https://cdn.jsdelivr.net/npm/@babel/standalone/babel.min.js" onload="__markLoad('babel')" onerror="__markFail('babel', this.src)"></script>
 
 <!-- Lucide -->
-<script src="https://cdn.jsdelivr.net/npm/lucide@0.363.0/dist/umd/lucide.js" crossorigin="anonymous"></script>
+<script id="lib-lucide" src="https://cdn.jsdelivr.net/npm/lucide@0.363.0/dist/umd/lucide.js" onload="__markLoad('lucide')" onerror="__markFail('lucide', this.src)"></script>
 
 <!-- Tailwind (play CDN) -->
-<script src="https://cdn.tailwindcss.com" crossorigin="anonymous"></script>
+<script id="lib-tailwind" src="https://cdn.tailwindcss.com" onload="__markLoad('tailwind')" onerror="__markFail('tailwind', this.src)"></script>
 
 <style>
   :root{
@@ -103,11 +112,11 @@
   function showFatal(label, detail){
     var root = document.getElementById("root");
     if(root) root.innerHTML =
-      '<div style="font-family:sans-serif;max-width:560px;margin:60px auto;padding:20px;border:1px solid #e0a;border-radius:10px;color:#7a1f1f;background:#fff3f3;white-space:pre-wrap;word-break:break-word;">' +
+      '<div style="font-family:sans-serif;max-width:560px;margin:40px auto;padding:20px;border:1px solid #e0a;border-radius:10px;color:#7a1f1f;background:#fff3f3;white-space:pre-wrap;word-break:break-word;">' +
       '<strong>OmniCBT failed to load.</strong><br/><br/>' +
       label + '<br/><br/>' +
       (detail || '') +
-      '</div>';
+      '</div>' + (window.__diagnosticsHTML ? window.__diagnosticsHTML() : '');
   }
   window.addEventListener("error", function(e){
     var detail = 'Error: ' + (e.message || "unknown") +
@@ -121,9 +130,33 @@
     if(reason && reason.stack) detail += '\n\n' + reason.stack;
     showFatal('A background task failed.', detail);
   });
+
+  // Diagnostics: report exactly which external resource(s) failed to load,
+  // and if nothing has failed but the app still hasn't booted after a few
+  // seconds, dump the full load status so we know where it's stuck.
+  var REQUIRED = ["react","react-dom","babel","lucide","tailwind","pdfjs","katex","katex-auto"];
+  window.__diagnosticsHTML = function(){
+    var rows = REQUIRED.map(function(id){
+      var st = window.__loadStatus[id] || "pending / never fired";
+      return '<div><strong>' + id + '</strong>: ' + st + '</div>';
+    }).join("");
+    return '<div style="font-family:sans-serif;max-width:560px;margin:16px auto;padding:16px;border:1px solid #ccc;border-radius:10px;font-size:13px;color:#333;background:#fafafa;">' +
+      '<strong>Resource load status</strong><br/><br/>' + rows + '</div>';
+  };
+  window.__renderDiagnostics = function(){
+    var anyFail = REQUIRED.some(function(id){ return window.__loadStatus[id] && window.__loadStatus[id].indexOf("FAILED") === 0; });
+    if(anyFail) showFatal("One or more required scripts failed to load — see below for exactly which one:", "");
+  };
+  setTimeout(function(){
+    var root = document.getElementById("root");
+    // If React never mounted (root still holds only our placeholder), report status.
+    if(root && root.textContent.indexOf("Loading OmniCBT") !== -1){
+      showFatal("The app never finished starting up (timed out after 8s).", "");
+    }
+  }, 8000);
 </script>
 
-<script type="text/babel" data-presets="react,stage-3">
+<script type="text/plain" id="app-source">
 const { useState, useEffect, useRef, useMemo, useCallback } = React;
 
 /* ============================== CONSTANTS ============================== */
@@ -1228,6 +1261,29 @@ function App(){
 }
 
 ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+
+<!-- Manually compile + run the app script above, in OUR OWN script context
+     (not Babel's), so that any error thrown gets full, unmasked detail
+     instead of being hidden as a cross-origin "Script error." -->
+<script>
+  (function(){
+    function boot(){
+      try{
+        var src = document.getElementById("app-source").textContent;
+        if(typeof Babel === "undefined") throw new Error("Babel did not load — cannot compile the app.");
+        var compiled = Babel.transform(src, { presets: ["react"] }).code;
+        (0, eval)(compiled);
+      }catch(err){
+        showFatal("The app code failed to compile or run.", (err && err.message) + (err && err.stack ? ("\n\n" + err.stack) : ""));
+      }
+    }
+    if(document.readyState === "complete" || document.readyState === "interactive"){
+      setTimeout(boot, 0);
+    }else{
+      document.addEventListener("DOMContentLoaded", boot);
+    }
+  })();
 </script>
 </body>
 </html>
