@@ -25,8 +25,7 @@
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
 <!-- Lucide -->
-<script src="https://cdnjs.cloudflare.com/ajax/libs/lucide-static/0.363.0/umd/lucide.min.js"></script>
-<script src="https://unpkg.com/lucide@0.363.0/dist/umd/lucide.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/lucide@0.363.0/dist/umd/lucide.js"></script>
 
 <!-- Tailwind (play CDN) -->
 <script src="https://cdn.tailwindcss.com"></script>
@@ -93,7 +92,25 @@
 </style>
 </head>
 <body>
-<div id="root"></div>
+<div id="root">
+  <div style="font-family:sans-serif;max-width:520px;margin:80px auto;padding:0 20px;color:#555;text-align:center;">
+    Loading OmniCBT…
+  </div>
+</div>
+
+<script>
+  // Surface any crash instead of leaving a blank page.
+  window.addEventListener("error", function(e){
+    var root = document.getElementById("root");
+    if(root) root.innerHTML =
+      '<div style="font-family:sans-serif;max-width:560px;margin:60px auto;padding:20px;border:1px solid #e0a;border-radius:10px;color:#7a1f1f;background:#fff3f3;">' +
+      '<strong>OmniCBT failed to load.</strong><br/><br/>' +
+      'Error: ' + (e.message || "unknown") + '<br/>' +
+      (e.filename ? ('at ' + e.filename + ':' + e.lineno) : '') +
+      '<br/><br/>This is usually a script blocked by a content blocker/VPN, or a poor connection while loading React/Tailwind/Lucide from their CDNs. Try disabling content blockers for this site, or reload on Wi-Fi.' +
+      '</div>';
+  });
+</script>
 
 <script type="text/babel" data-presets="react,stage-3">
 const { useState, useEffect, useRef, useMemo, useCallback } = React;
