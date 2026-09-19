@@ -227,6 +227,7 @@ function saveState(state){
 function defaultState(){
   return {
     apiKey: "", provider:"openai", model: "gpt-4o-mini",
+    pagesPerRequest: 4, sendPageImages: true,
     theme: "light",
     bank: null,
     history: [],
@@ -290,8 +291,20 @@ function Icon({ name, size=18, className="", strokeWidth=2 }){
   useEffect(()=>{
     if(ref.current && window.lucide && window.lucide.createElement){
       ref.current.innerHTML = "";
-      const map = window.lucide.icons || window.lucide;
-      const def = map[name];
+      // Lucide's UMD build has exposed icons under different key casings across
+      // versions (kebab-case, PascalCase). Try every reasonable form instead of
+      // assuming one, so an icon never silently fails to render.
+      const iconsMap = window.lucide.icons || {};
+      const pascal = name.split("-").map(w => w.charAt(0).toUpperCase() + w.slice(1)).join("");
+      const camel = pascal.charAt(0).toLowerCase() + pascal.slice(1);
+      let def = iconsMap[name] || iconsMap[pascal] || window.lucide[pascal] || window.lucide[camel] || window.lucide[name];
+      if(!def){
+        // Last resort: scan all keys and match case-insensitively / ignoring dashes.
+        const target = name.replace(/-/g, "").toLowerCase();
+        const pool = Object.keys(iconsMap).length ? iconsMap : window.lucide;
+        const foundKey = Object.keys(pool).find(k => k.replace(/-/g, "").toLowerCase() === target);
+        if(foundKey) def = pool[foundKey];
+      }
       if(def){
         const svg = window.lucide.createElement(def);
         svg.setAttribute("width", size); svg.setAttribute("height", size);
@@ -329,11 +342,13 @@ function ToastStack({ toasts }){
 
 /* ============================== AI CALL ============================== */
 
-async function callOpenAI({ apiKey, model, images }){
+async function callOpenAI({ apiKey, model, pages, sendImages }){
   const content = [
-    { type:"text", text:"Extract all questions from these past-question pages into the JSON schema described in the system prompt." },
-    ...images.map(img => ({ type:"image_url", image_url:{ url: img } }))
+    { type:"text", text: sendImages
+      ? "Extract all questions from these past-question pages into the JSON schema described in the system prompt."
+      : "Extract all questions from the following past-question page text into the JSON schema described in the system prompt:\n\n" + pages.map((p,i)=>`--- Page ${p.pageNumber} ---\n${p.text}`).join("\n\n") }
   ];
+  if(sendImages) pages.forEach(p => content.push({ type:"image_url", image_url:{ url: p.image } }));
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
     method:"POST",
     headers:{ "Content-Type":"application/json", "Authorization":`Bearer ${apiKey}` },
@@ -357,15 +372,14 @@ async function callOpenAI({ apiKey, model, images }){
   return text;
 }
 
-async function callGemini({ apiKey, model, images }){
+async function callGemini({ apiKey, model, pages, sendImages }){
   const m = model || "gemini-1.5-flash";
   const parts = [
-    { text: SYSTEM_PROMPT },
-    ...images.map(img => {
-      const base64 = img.split(",")[1];
-      return { inline_data: { mime_type: "image/jpeg", data: base64 } };
-    })
+    { text: sendImages
+      ? SYSTEM_PROMPT
+      : SYSTEM_PROMPT + "\n\nPage text:\n\n" + pages.map(p=>`--- Page ${p.pageNumber} ---\n${p.text}`).join("\n\n") }
   ];
+  if(sendImages) pages.forEach(p => parts.push({ inline_data: { mime_type: "image/jpeg", data: p.image.split(",")[1] } }));
   const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${apiKey}`, {
     method:"POST",
     headers:{ "Content-Type":"application/json" },
@@ -398,13 +412,29 @@ function parseExtractedJSON(raw){
   return parsed;
 }
 
-/* Render PDF pages to base64 JPEG images using pdf.js */
-async function pdfToImages(file, onProgress, maxPages = 25){
+/* Merge multiple extracted banks (one per batch) into a single question bank,
+   renumbering ids so batches never collide. */
+function mergeBanks(banks){
+  const title = banks.find(b=>b.title)?.title || "Extracted question bank";
+  const availableSubjects = [...new Set(banks.flatMap(b=>b.availableSubjects||[]))];
+  const availableYears = [...new Set(banks.flatMap(b=>b.availableYears||[]))];
+  const questions = banks.flatMap(b=>b.questions).map((q,i)=>({ ...q, id:`q${i+1}` }));
+  return { title, availableSubjects, availableYears, questions };
+}
+
+function chunk(arr, size){
+  const out = [];
+  for(let i=0;i<arr.length;i+=size) out.push(arr.slice(i, i+size));
+  return out;
+}
+
+/* Render PDF pages to base64 JPEG images (and extract their text) using pdf.js */
+async function pdfToPages(file, onProgress, maxPages = 60){
   const arrayBuffer = await file.arrayBuffer();
   window.pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
   const pdf = await window.pdfjsLib.getDocument({ data: arrayBuffer }).promise;
   const total = Math.min(pdf.numPages, maxPages);
-  const images = [];
+  const pages = [];
   for(let i=1;i<=total;i++){
     const page = await pdf.getPage(i);
     const viewport = page.getViewport({ scale: 1.6 });
@@ -412,10 +442,16 @@ async function pdfToImages(file, onProgress, maxPages = 25){
     canvas.width = viewport.width; canvas.height = viewport.height;
     const ctx = canvas.getContext("2d");
     await page.render({ canvasContext: ctx, viewport }).promise;
-    images.push(canvas.toDataURL("image/jpeg", 0.82));
+    const image = canvas.toDataURL("image/jpeg", 0.82);
+    let text = "";
+    try{
+      const textContent = await page.getTextContent();
+      text = textContent.items.map(it=>it.str).join(" ");
+    }catch(e){ /* text extraction is best-effort; images still work without it */ }
+    pages.push({ pageNumber: i, image, text });
     onProgress && onProgress(i, total);
   }
-  return images;
+  return pages;
 }
 
 /* ============================== HEADER ============================== */
@@ -475,26 +511,55 @@ function SettingsModal({ state, setState, onClose, push }){
   const [apiKey, setApiKey] = useState(state.apiKey);
   const [provider, setProvider] = useState(state.provider);
   const [model, setModel] = useState(state.model);
+  const [showHelp, setShowHelp] = useState(false);
+  const [pagesPerRequest, setPagesPerRequest] = useState(state.pagesPerRequest || 4);
+  const [sendPageImages, setSendPageImages] = useState(state.sendPageImages !== false);
+  const [confirmWipe, setConfirmWipe] = useState(false);
 
   const modelsFor = (p) => p === "openai" ? ["gpt-4o-mini","gpt-4o"] : ["gemini-1.5-flash","gemini-1.5-pro"];
 
+  const helpFor = (p) => p === "openai"
+    ? { url:"https://platform.openai.com/api-keys", host:"platform.openai.com", note:"Requires billing set up on your OpenAI account — usage is billed per request, typically a few cents per PDF." }
+    : { url:"https://aistudio.google.com/apikey", host:"aistudio.google.com", note:"Free to create, no card required, within Google's daily usage limits — the easier option to start with." };
+
+  const storageBytes = (() => {
+    try{ return new Blob([localStorage.getItem(STORAGE_KEY) || ""]).size; }catch(e){ return 0; }
+  })();
+  const storageLabel = storageBytes > 1024 ? `${(storageBytes/1024).toFixed(1)} KB` : `${storageBytes} B`;
+
   const save = () => {
     const m = model || modelsFor(provider)[0];
-    setState(s=>({ ...s, apiKey: apiKey.trim(), provider, model: m }));
+    setState(s=>({ ...s, apiKey: apiKey.trim(), provider, model: m, pagesPerRequest: Number(pagesPerRequest), sendPageImages }));
     push("Settings saved");
     onClose();
   };
 
+  const resetDefaults = () => {
+    setPagesPerRequest(4); setSendPageImages(true);
+    push("Extraction settings reset to defaults");
+  };
+
+  const wipeAll = () => {
+    localStorage.removeItem(STORAGE_KEY);
+    setState(defaultState());
+    document.documentElement.setAttribute("data-theme", "light");
+    setConfirmWipe(false);
+    onClose();
+    push("All local data wiped");
+  };
+
   return (
     <Modal onClose={onClose}>
-      <div className="p-6">
+      <div className="p-6 pb-4">
         <div className="flex items-center justify-between mb-1">
-          <h2 className="serif text-xl font-semibold">API configuration</h2>
-          <button onClick={onClose} className="w-8 h-8 rounded-full flex items-center justify-center hover:opacity-70" aria-label="Close">
+          <h2 className="serif text-xl font-semibold">API & extraction settings</h2>
+          <button onClick={onClose} className="w-8 h-8 rounded-full flex items-center justify-center hover:opacity-70 shrink-0" aria-label="Close">
             <Icon name="x" size={16} />
           </button>
         </div>
-        <p className="text-sm mb-5" style={{ color:"var(--ink-soft)" }}>Your key is stored only in this browser's local storage and sent directly to the provider you choose.</p>
+        <p className="text-sm mb-5" style={{ color:"var(--ink-soft)" }}>
+          Calls {provider === "openai" ? "OpenAI" : "Google AI Studio"} from this tab. The key stays in localStorage on this device.
+        </p>
 
         <div className="mb-4">
           <label className="text-xs font-semibold uppercase tracking-wide" style={{ color:"var(--ink-soft)" }}>Provider</label>
@@ -518,25 +583,89 @@ function SettingsModal({ state, setState, onClose, push }){
         </div>
 
         <div className="mb-5">
-          <label className="text-xs font-semibold uppercase tracking-wide" style={{ color:"var(--ink-soft)" }}>
-            {provider === "openai" ? "OpenAI API key" : "Gemini API key"}
-          </label>
+          <div className="flex items-center gap-1.5">
+            <label className="text-xs font-semibold uppercase tracking-wide" style={{ color:"var(--ink-soft)" }}>
+              {provider === "openai" ? "OpenAI API key" : "Gemini API key"}
+            </label>
+            <button type="button" onClick={()=>setShowHelp(v=>!v)} aria-label="What is this?"
+              className="w-4 h-4 rounded-full flex items-center justify-center shrink-0 transition hover:opacity-70"
+              style={{ color: showHelp ? "var(--gold)" : "var(--ink-soft)" }}>
+              <Icon name="circle-help" size={14} />
+            </button>
+          </div>
+          {showHelp && (
+            <div className="mt-2 mb-2.5 px-3 py-2.5 rounded-lg text-[12.5px] leading-relaxed" style={{ background:"var(--gold-soft)", color:"var(--ink)" }}>
+              Don't have a key yet? Get one free at{" "}
+              <a href={helpFor(provider).url} target="_blank" rel="noopener noreferrer" className="font-semibold underline">{helpFor(provider).host}</a>.
+              {" "}{helpFor(provider).note}
+            </div>
+          )}
           <input type="password" value={apiKey} onChange={e=>setApiKey(e.target.value)}
             placeholder={provider === "openai" ? "sk-..." : "AIza..."}
             className="mt-2 w-full px-3 py-2.5 rounded-lg text-sm mono bg-transparent" style={{ border:"1px solid var(--rule)" }} />
         </div>
 
-        <div className="flex gap-2">
-          <button onClick={save} className="flex-1 py-2.5 rounded-lg text-sm font-semibold transition hover:opacity-90" style={{ background:"var(--ink)", color:"var(--paper)" }}>
-            Save settings
-          </button>
-          {state.apiKey && (
-            <button onClick={()=>{ setState(s=>({...s, apiKey:""})); setApiKey(""); push("API key cleared"); }}
-              className="px-4 py-2.5 rounded-lg text-sm font-medium" style={{ border:"1px solid var(--rule)", color:"var(--wrong)" }}>
-              Clear
-            </button>
-          )}
+        <div className="mb-2 pt-4" style={{ borderTop:"1px solid var(--rule)" }}>
+          <div className="serif font-bold text-[15px] mb-0.5">Extraction settings</div>
+          <p className="text-xs mb-4" style={{ color:"var(--ink-soft)" }}>Choose who reads your PDFs and how aggressively the pages are sampled.</p>
         </div>
+
+        <div className="mb-1.5">
+          <label className="text-xs font-semibold uppercase tracking-wide" style={{ color:"var(--ink-soft)" }}>Pages per request</label>
+          <select value={pagesPerRequest} onChange={e=>setPagesPerRequest(Number(e.target.value))}
+            className="mt-2 w-full px-3 py-2.5 rounded-lg text-sm bg-transparent" style={{ border:"1px solid var(--rule)" }}>
+            {[1,2,4,6,10,20].map(n => <option key={n} value={n}>{n} page{n>1?"s":""}</option>)}
+          </select>
+          <p className="text-xs mt-1.5" style={{ color:"var(--ink-soft)" }}>Smaller batches are slower but survive long papers.</p>
+        </div>
+
+        <button type="button" onClick={()=>setSendPageImages(v=>!v)}
+          className="w-full text-left rounded-xl p-4 mt-4 flex items-start gap-3 transition"
+          style={{ border:"1px solid var(--rule)" }}>
+          <span className="w-5 h-5 rounded-md flex items-center justify-center shrink-0 mt-0.5"
+            style={ sendPageImages ? { background:"var(--gold)", color:"#fff" } : { border:"1px solid var(--rule)" } }>
+            {sendPageImages && <Icon name="check" size={13} strokeWidth={3} />}
+          </span>
+          <span>
+            <span className="flex items-center gap-1.5 font-semibold text-[14px]">
+              <Icon name="eye" size={14} /> Send rendered page images
+            </span>
+            <span className="block text-xs mt-1 leading-relaxed" style={{ color:"var(--ink-soft)" }}>
+              Required for scanned papers, diagrams and hand-set equations. Turn it off for clean, text-only PDFs to cut cost and time.
+            </span>
+          </span>
+        </button>
+
+        <div className="rounded-xl p-4 mt-4 flex items-center justify-between flex-wrap gap-2" style={{ border:"1px dashed var(--rule)" }}>
+          <div className="flex items-center gap-1.5 text-xs" style={{ color:"var(--ink-soft)" }}>
+            <Icon name="hard-drive" size={13} /> {storageLabel} saved on this device
+          </div>
+          <div className="flex items-center gap-2">
+            <button onClick={resetDefaults} className="flex items-center gap-1.5 text-xs font-medium px-2.5 py-1.5 rounded-lg" style={{ color:"var(--ink-soft)" }}>
+              <Icon name="settings" size={12} /> Reset defaults
+            </button>
+            {!confirmWipe ? (
+              <button onClick={()=>setConfirmWipe(true)} className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-lg" style={{ background:"var(--wrong)", color:"#fff" }}>
+                <Icon name="trash-2" size={12} /> Wipe all data
+              </button>
+            ) : (
+              <div className="flex items-center gap-1.5">
+                <span className="text-xs" style={{ color:"var(--wrong)" }}>Sure?</span>
+                <button onClick={wipeAll} className="text-xs font-semibold px-2.5 py-1.5 rounded-lg" style={{ background:"var(--wrong)", color:"#fff" }}>Yes, wipe</button>
+                <button onClick={()=>setConfirmWipe(false)} className="text-xs px-2.5 py-1.5 rounded-lg" style={{ border:"1px solid var(--rule)" }}>Cancel</button>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="flex items-center justify-end gap-2 px-6 py-4" style={{ borderTop:"1px solid var(--rule)" }}>
+        <button onClick={onClose} className="px-4 py-2.5 rounded-lg text-sm font-medium" style={{ color:"var(--ink-soft)" }}>
+          Cancel
+        </button>
+        <button onClick={save} className="px-6 py-2.5 rounded-lg text-sm font-semibold transition hover:opacity-90" style={{ background:"var(--gold)", color:"#fff" }}>
+          Save settings
+        </button>
       </div>
     </Modal>
   );
@@ -583,16 +712,24 @@ function UploadScreen({ state, setState, push }){
     if(!state.apiKey){ setError("Add your API key first (top right) — it's needed to read the PDF."); return; }
     setError(""); setProcessing(true);
     try{
-      setStage("Extracting pages...");
-      const images = await pdfToImages(file, (i,total)=> setStage(`Extracting page ${i} of ${total}...`));
-      setStage("AI scanning questions & diagram structures...");
-      const raw = state.provider === "openai"
-        ? await callOpenAI({ apiKey: state.apiKey, model: state.model, images })
-        : await callGemini({ apiKey: state.apiKey, model: state.model, images });
+      setStage("Reading PDF pages...");
+      const pages = await pdfToPages(file, (i,total)=> setStage(`Reading page ${i} of ${total}...`));
+      const batchSize = Math.max(1, Number(state.pagesPerRequest) || 4);
+      const batches = chunk(pages, batchSize);
+      const results = [];
+      for(let b=0; b<batches.length; b++){
+        setStage(batches.length > 1
+          ? `AI scanning batch ${b+1} of ${batches.length}...`
+          : "AI scanning questions & diagram structures...");
+        const raw = state.provider === "openai"
+          ? await callOpenAI({ apiKey: state.apiKey, model: state.model, pages: batches[b], sendImages: state.sendPageImages !== false })
+          : await callGemini({ apiKey: state.apiKey, model: state.model, pages: batches[b], sendImages: state.sendPageImages !== false });
+        results.push(parseExtractedJSON(raw));
+      }
       setStage("Indexing subjects and years...");
-      const bank = parseExtractedJSON(raw);
+      const bank = mergeBanks(results);
       setState(s=>({ ...s, bank }));
-      push(`Extracted ${bank.questions.length} questions`, { tone:"save" });
+      push(`Extracted ${bank.questions.length} questions${batches.length>1 ? ` across ${batches.length} batches` : ""}`, { tone:"save" });
     }catch(e){
       console.error(e);
       setError(e.message || "Extraction failed. Check your API key and try again.");
