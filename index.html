@@ -243,7 +243,8 @@ function defaultState(){
 
 /* Keep a small library of already-extracted papers so a PDF never has to be
    re-read from scratch. Newest first, capped so local storage doesn't grow
-   without bound. */
+   without bound — page images make each saved paper noticeably bigger than
+   before, so this cap is lower than it would otherwise need to be. */
 function saveBankToHistory(savedBanks, bank, sourceName){
   const entry = {
     id: uid(),
@@ -251,7 +252,7 @@ function saveBankToHistory(savedBanks, bank, sourceName){
     sourceName: sourceName || "Untitled PDF",
     bank
   };
-  return [entry, ...(savedBanks || [])].slice(0, 10);
+  return [entry, ...(savedBanks || [])].slice(0, 5);
 }
 function timeAgo(ts){
   const s = Math.floor((Date.now() - ts) / 1000);
@@ -310,6 +311,33 @@ function MathText({ text, className }){
     }
   }, [text]);
   return <span ref={ref} className={className}>{text}</span>;
+}
+
+/* Shows the original scanned page(s) a question came from, collapsed by
+   default — this is how a diagram, figure, or hand-drawn equation actually
+   gets seen, since the extracted text alone has no way to represent one. */
+function PageImageViewer({ question, bank }){
+  const [open, setOpen] = useState(false);
+  const pageNums = question.sourcePages || [];
+  const images = pageNums.map(n => bank?.pageThumbs?.[n]).filter(Boolean);
+  if(images.length === 0) return null;
+  return (
+    <div className="mb-5">
+      <button onClick={()=>setOpen(v=>!v)}
+        className="text-xs font-semibold flex items-center gap-1.5 px-3 py-1.5 rounded-full transition hover:opacity-80"
+        style={{ border:"1px solid var(--rule)", color:"var(--ink-soft)" }}>
+        <Icon name="image" size={13} />
+        {open ? "Hide original page" : "View original page (for diagrams/figures)"}
+      </button>
+      {open && (
+        <div className="mt-3 space-y-2 rounded-xl p-2 scrollthin overflow-x-auto flex gap-2" style={{ border:"1px solid var(--rule)", background:"var(--paper)" }}>
+          {images.map((src,i)=>(
+            <img key={i} src={src} alt={`Original page ${pageNums[i]}`} className="rounded-lg max-h-[420px] shrink-0" style={{ border:"1px solid var(--rule)" }} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 /* ============================== ICONS ============================== */
@@ -568,6 +596,7 @@ async function pdfToPages(file, onProgress, maxPages = 200, renderImages = true)
   for(let i=1;i<=total;i++){
     const page = await pdf.getPage(i);
     let image = null;
+    let thumb = null;
     if(renderImages){
       const viewport = page.getViewport({ scale: 1.6 });
       const canvas = document.createElement("canvas");
@@ -575,16 +604,56 @@ async function pdfToPages(file, onProgress, maxPages = 200, renderImages = true)
       const ctx = canvas.getContext("2d");
       await page.render({ canvasContext: ctx, viewport }).promise;
       image = canvas.toDataURL("image/jpeg", 0.82);
+      // A much smaller, more compressed copy of the same render, just for
+      // showing the page later (diagrams, figures) — the full-res version
+      // above is only needed for the AI call and isn't worth keeping around
+      // in local storage for every page of a long document.
+      const thumbCanvas = document.createElement("canvas");
+      const thumbScale = Math.min(1, 700 / canvas.width);
+      thumbCanvas.width = Math.round(canvas.width * thumbScale);
+      thumbCanvas.height = Math.round(canvas.height * thumbScale);
+      thumbCanvas.getContext("2d").drawImage(canvas, 0, 0, thumbCanvas.width, thumbCanvas.height);
+      thumb = thumbCanvas.toDataURL("image/jpeg", 0.5);
     }
     let text = "";
     try{
       const textContent = await page.getTextContent();
       text = textContent.items.map(it=>it.str).join(" ");
     }catch(e){ /* text extraction is best-effort; images still work without it */ }
-    pages.push({ pageNumber: i, image, text });
+    pages.push({ pageNumber: i, image, thumb, text });
     onProgress && onProgress(i, total);
   }
   return pages;
+}
+
+/* A page whose text looks like a section banner — e.g. "PHYSICS 1983" or
+   "Mathematics 2001" — almost always means a new subject/year is starting
+   right there. Recognizing this lets extraction start a fresh request
+   exactly at that boundary instead of blindly cutting every N pages, which
+   is what was splitting a heading away from the questions that depend on it. */
+function looksLikeSectionHeading(pageText){
+  const head = (pageText || "").trim().replace(/\s+/g, " ").slice(0, 60);
+  return /^[A-Za-z][A-Za-z .&/-]{2,35}\s(19|20)\d{2}\b/.test(head);
+}
+
+/* Group pages for reading: start a new group right at a detected section
+   heading (keeping it together with the questions that follow it), and
+   otherwise fall back to a plain page-count cap so no single request ever
+   gets too large. */
+function smartChunk(pages, targetSize){
+  const groups = [];
+  let current = [];
+  for(let i=0;i<pages.length;i++){
+    const p = pages[i];
+    const isNewSection = current.length > 0 && looksLikeSectionHeading(p.text);
+    if(isNewSection || current.length >= targetSize){
+      groups.push(current);
+      current = [];
+    }
+    current.push(p);
+  }
+  if(current.length) groups.push(current);
+  return groups;
 }
 
 /* ============================== HEADER ============================== */
@@ -922,8 +991,14 @@ function UploadScreen({ state, setState, push }){
       setStage("Reading PDF pages...");
       const pages = await pdfToPages(file, (i,total)=> setStage(`Reading page ${i} of ${total}...`), 200, sendImages);
       const groupSize = Math.max(1, Number(state.pagesPerRequest) || 4);
-      const groups = chunk(pages, groupSize);
+      // Start a fresh request right at a detected "PHYSICS 1983"-style
+      // section banner instead of blindly cutting every N pages — that was
+      // exactly what could split a heading away from its own questions and
+      // leave them mislabeled "Unknown".
+      const groups = smartChunk(pages, groupSize);
       const skipped = [];
+      const pageThumbs = {};
+      pages.forEach(p => { if(p.thumb) pageThumbs[p.pageNumber] = p.thumb; });
 
       // Free API keys have real, fairly tight per-minute limits — reading
       // several page-groups at once can blow straight through them, which
@@ -936,7 +1011,14 @@ function UploadScreen({ state, setState, push }){
           const raw = state.provider === "openai"
             ? await callOpenAI({ apiKey: state.apiKey, model: state.model, pages: group, sendImages })
             : await callGemini({ apiKey: state.apiKey, model: state.model, pages: group, sendImages });
-          return parseExtractedJSON(raw);
+          const parsed = parseExtractedJSON(raw);
+          // Tag every question with the real page numbers it came from —
+          // driven by our own grouping, not something we have to trust the
+          // AI to report accurately — so the original page (with any
+          // diagram) can be shown later.
+          const sourcePages = group.map(p => p.pageNumber);
+          parsed.questions = parsed.questions.map(q => ({ ...q, sourcePages }));
+          return parsed;
         }, { retries: 3, baseDelayMs: state.slowMode ? 3000 : 1500 });
       }, (done, total) => {
         setStage(total > 1 ? `Scanning questions (${done} of ${total} parts done)...` : "Scanning questions & diagrams...");
@@ -959,6 +1041,7 @@ function UploadScreen({ state, setState, push }){
       }
       setStage("Sorting questions by subject and year...");
       const bank = mergeBanks(results);
+      bank.pageThumbs = pageThumbs;
       setState(s=>({ ...s, bank, savedBanks: saveBankToHistory(s.savedBanks, bank, file.name) }));
       if(skipped.length > 0){
         push(`Found ${bank.questions.length} questions — had trouble with ${skipped.map(f=>f.range).join(", ")}, so those were skipped`, { tone:"save", duration: 5000 });
@@ -1403,6 +1486,8 @@ function ExamScreen({ state, setState, push, onFinish }){
               </div>
             )}
 
+            <PageImageViewer question={q} bank={state.bank} />
+
             <div className="serif text-[19px] leading-relaxed mb-6">
               <MathText text={q.questionText} />
             </div>
@@ -1612,6 +1697,7 @@ function ResultsScreen({ state, setState, result, push, onExit }){
                   <MathText text={g.passage} />
                 </div>
               )}
+              <PageImageViewer question={g} bank={state.bank} />
               <div className="text-sm mb-2 serif"><MathText text={g.questionText} /></div>
               <div className="text-xs space-y-1">
                 <div style={{ color:"var(--ink-soft)" }}>Your answer: <span className="font-medium" style={{ color: g.answered ? (g.correct?"var(--correct)":"var(--wrong)") : "var(--ink-soft)" }}>{g.selected ? `${g.selected}. ${g.options.find(o=>o.label===g.selected)?.text||""}` : "—"}</span></div>
