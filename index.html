@@ -592,6 +592,31 @@ async function withRetry(fn, { retries = 2, baseDelayMs = 1500 } = {}){
   throw lastErr;
 }
 
+/* pdf.js hands back text items in whatever order they sit in the PDF's raw
+   content stream — for a two-column exam layout, that's often literally
+   "left-column question 1, then right-column question 10, then left-column
+   question 2..." interleaved. Naively joining that scrambles the numbering
+   the AI is trying to read (and is almost certainly why some questions were
+   getting dropped in text-only mode). This buckets items into a left/right
+   column by their actual x position, then reads each column top-to-bottom
+   on its own, which is what a person actually does with a two-column page. */
+function readingOrderText(textContent, pageWidth){
+  const items = (textContent.items || [])
+    .filter(it => it.str && it.str.trim())
+    .map(it => ({ str: it.str, x: it.transform ? it.transform[4] : 0, y: it.transform ? it.transform[5] : 0 }));
+  if(items.length === 0) return "";
+  const mid = pageWidth / 2;
+  const left = items.filter(it => it.x < mid);
+  const right = items.filter(it => it.x >= mid);
+  // If almost everything is on one side, this isn't really a two-column
+  // page — just read it as one column in its natural top-to-bottom order.
+  if(left.length < items.length * 0.15 || right.length < items.length * 0.15){
+    return items.slice().sort((a,b) => (b.y - a.y) || (a.x - b.x)).map(it=>it.str).join(" ");
+  }
+  const readTopToBottom = (arr) => arr.slice().sort((a,b) => (b.y - a.y) || (a.x - b.x)).map(it=>it.str).join(" ");
+  return [readTopToBottom(left), readTopToBottom(right)].filter(Boolean).join(" ");
+}
+
 /* Render PDF pages to base64 JPEG images (and extract their text) using pdf.js.
    Skips the (slow) canvas rendering entirely when images won't be sent anyway. */
 async function pdfToPages(file, onProgress, maxPages = 200, renderImages = true){
@@ -625,7 +650,8 @@ async function pdfToPages(file, onProgress, maxPages = 200, renderImages = true)
     let text = "";
     try{
       const textContent = await page.getTextContent();
-      text = textContent.items.map(it=>it.str).join(" ");
+      const baseViewport = page.getViewport({ scale: 1 });
+      text = readingOrderText(textContent, baseViewport.width);
     }catch(e){ /* text extraction is best-effort; images still work without it */ }
     pages.push({ pageNumber: i, image, thumb, text });
     onProgress && onProgress(i, total);
@@ -918,7 +944,7 @@ function SettingsModal({ state, setState, onClose, push }){
               <Icon name="eye" size={14} /> Send rendered page images
             </span>
             <span className="block text-xs mt-1 leading-relaxed" style={{ color:"var(--ink-soft)" }}>
-              Required for scanned papers, diagrams and hand-set equations. Turn it off for clean, text-only PDFs to cut cost and time.
+              Required for diagrams, figures and hand-set equations to show up at all — both for the AI reading them and for you viewing them afterward. Only turn this off for a PDF you already know is clean, text-only, and has no figures — text-only reading is faster and cheaper, but the AI is noticeably more likely to misread multi-column layouts and any question relying on an image will be missing its diagram.
             </span>
           </span>
         </button>
@@ -1644,8 +1670,8 @@ function ResultsScreen({ state, setState, result, push, onExit }){
   const [tab, setTab] = useState("all");
   const { questions, answers, mode, elapsedTotal } = result;
 
-  const graded = questions.map(q=>({
-    ...q, selected: answers[q.id], correct: answers[q.id] === q.correctOption, answered: answers[q.id] !== undefined
+  const graded = questions.map((q,i)=>({
+    ...q, number: i+1, selected: answers[q.id], correct: answers[q.id] === q.correctOption, answered: answers[q.id] !== undefined
   }));
   const numCorrect = graded.filter(g=>g.correct).length;
   const numIncorrect = graded.filter(g=>g.answered && !g.correct).length;
@@ -1715,7 +1741,7 @@ function ResultsScreen({ state, setState, result, push, onExit }){
           {filtered.map((g,i)=>(
             <div key={g.id} className="rounded-xl p-4" style={{ border:"1px solid var(--rule)" }}>
               <div className="flex items-center gap-2 mb-2 flex-wrap text-[11px]" style={{ color:"var(--ink-soft)" }}>
-                <span className="font-semibold" style={{ color:"var(--ink)" }}>Q{questions.indexOf(g)+1}</span>
+                <span className="font-semibold" style={{ color:"var(--ink)" }}>Q{g.number}</span>
                 <span>· {g.subject}</span><span>· {g.year}</span>
                 {g.answered ? (
                   g.correct ? <span className="px-2 py-0.5 rounded-full" style={{ background:"var(--correct-soft)", color:"var(--correct)" }}>Correct</span>
