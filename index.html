@@ -182,6 +182,7 @@ const SYSTEM_PROMPT = `Analyze the provided PDF content. Extract all multiple-ch
       "year": "2021",
       "subject": "Physics",
       "section": "Section A",
+      "passage": "If this question depends on a shared reading passage, comprehension text, or a longer sentence with an underlined word, put that full passage/sentence here so the question makes complete sense on its own. Omit this field entirely if the question is self-contained.",
       "questionText": "Question text here (convert math to LaTeX format like $E=mc^2$)",
       "options": [{"label": "A", "text": "Option 1"}, {"label": "B", "text": "Option 2"}],
       "correctOption": "A",
@@ -190,6 +191,8 @@ const SYSTEM_PROMPT = `Analyze the provided PDF content. Extract all multiple-ch
   ]
 }
 If the answer key is at the end of the document, cross-reference question numbers to ensure correct mapping. If no answer key exists, solve the questions and generate accurate explanations.
+Never write a question that only makes sense next to the original page — phrases like "the passage above", "the underlined word", or "in the sentence below" are meaningless once separated from that page, so the full underlying text they refer to MUST be copied into the "passage" field (or inlined into questionText) every time. This matters most for English/comprehension/use-of-English style questions.
+Use consistent, clean subject names every time (e.g. always "English Language", never "ENGLISH LANGUAGE" or "english language" in some places and "English Language" in others) — this document is being read in several small slices, and inconsistent naming across slices will fragment what should be one subject into several.
 Note: this is one small slice of a larger document. A subject or year heading (e.g. "PHYSICS", "2021") may have appeared on an earlier page not included here and may not repeat on every page. If a page in this slice doesn't explicitly restate the subject or year, infer the most likely one from context (topic, terminology, question numbering continuing from a prior page) rather than leaving it blank or defaulting to whatever subject you extracted most recently without checking if it still fits.
 Respond with ONLY the JSON object, no markdown fences, no commentary.`;
 
@@ -229,7 +232,7 @@ function saveState(state){
 function defaultState(){
   return {
     apiKey: "", provider:"openai", model: "gpt-4o-mini",
-    pagesPerRequest: 4, sendPageImages: true,
+    pagesPerRequest: 4, sendPageImages: true, slowMode: false,
     theme: "light",
     bank: null,
     savedBanks: [],
@@ -388,7 +391,10 @@ async function callOpenAI({ apiKey, model, pages, sendImages }){
   });
   if(!res.ok){
     const errText = await res.text().catch(()=> "");
-    throw new Error(`OpenAI API error (${res.status}): ${errText.slice(0,300)}`);
+    const err = new Error(`OpenAI API error (${res.status}): ${errText.slice(0,300)}`);
+    err.status = res.status;
+    err.retryAfter = res.headers.get("retry-after");
+    throw err;
   }
   const data = await res.json();
   const text = data?.choices?.[0]?.message?.content;
@@ -414,7 +420,10 @@ async function callGemini({ apiKey, model, pages, sendImages }){
   });
   if(!res.ok){
     const errText = await res.text().catch(()=> "");
-    throw new Error(`Gemini API error (${res.status}): ${errText.slice(0,300)}`);
+    const err = new Error(`Gemini API error (${res.status}): ${errText.slice(0,300)}`);
+    err.status = res.status;
+    err.retryAfter = res.headers.get("retry-after");
+    throw err;
   }
   const data = await res.json();
   const text = data?.candidates?.[0]?.content?.parts?.map(p=>p.text).join("");
@@ -463,12 +472,34 @@ function parseExtractedJSON(raw){
 }
 
 /* Combine the results read from each group of pages into one single
-   question bank, and renumber question ids so nothing collides. */
+   question bank, and renumber question ids so nothing collides.
+   Different page-groups are read independently, so the same subject often
+   comes back spelled differently ("ENGLISH LANGUAGE" vs "English Language")
+   — collapse those into one canonical label instead of showing near-
+   duplicate subjects. */
+function titleCase(str){
+  return str.replace(/\S+/g, w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase());
+}
 function mergeBanks(banks){
   const title = banks.find(b=>b.title)?.title || "Extracted question bank";
-  const availableSubjects = [...new Set(banks.flatMap(b=>b.availableSubjects||[]))];
-  const availableYears = [...new Set(banks.flatMap(b=>b.availableYears||[]))];
-  const questions = banks.flatMap(b=>b.questions).map((q,i)=>({ ...q, id:`q${i+1}` }));
+
+  const canonicalSubjects = new Map(); // normalized key -> display label
+  const canonicalize = (raw) => {
+    const clean = (raw || "General").toString().trim().replace(/\s+/g, " ");
+    const key = clean.toLowerCase();
+    if(!canonicalSubjects.has(key)) canonicalSubjects.set(key, titleCase(clean));
+    return canonicalSubjects.get(key);
+  };
+
+  const questions = banks.flatMap(b=>b.questions).map((q,i)=>({
+    ...q,
+    id: `q${i+1}`,
+    subject: canonicalize(q.subject),
+    year: (q.year || "Unknown").toString().trim()
+  }));
+
+  const availableSubjects = [...new Set(questions.map(q=>q.subject))].sort();
+  const availableYears = [...new Set(questions.map(q=>q.year))].sort();
   return { title, availableSubjects, availableYears, questions };
 }
 
@@ -503,14 +534,25 @@ async function runPool(items, limit, worker, onSettle){
   return results;
 }
 
-/* Retry a flaky call once before giving up — a lot of "batch failed" cases
-   are just a transient network hiccup or a momentary bad response, not a
-   real, permanent problem with those pages. */
-async function withRetry(fn, retries = 1){
+/* Retry a flaky call before giving up. Rate-limit errors (429) get a real
+   wait — often several seconds, using whatever the provider itself says to
+   wait — since retrying instantly just hits the same wall again. Anything
+   else gets a short pause, since it's more likely a one-off glitch. */
+async function withRetry(fn, { retries = 2, baseDelayMs = 1500 } = {}){
   let lastErr;
   for(let attempt=0; attempt <= retries; attempt++){
     try{ return await fn(); }
-    catch(e){ lastErr = e; }
+    catch(e){
+      lastErr = e;
+      if(attempt < retries){
+        const isRateLimit = e.status === 429;
+        const serverWait = Number(e.retryAfter) * 1000;
+        const wait = isRateLimit
+          ? (serverWait > 0 ? serverWait : baseDelayMs * Math.pow(2, attempt + 1))
+          : baseDelayMs;
+        await new Promise(r => setTimeout(r, wait));
+      }
+    }
   }
   throw lastErr;
 }
@@ -612,6 +654,7 @@ function SettingsModal({ state, setState, onClose, push }){
   const [showHelp, setShowHelp] = useState(false);
   const [pagesPerRequest, setPagesPerRequest] = useState(state.pagesPerRequest || 4);
   const [sendPageImages, setSendPageImages] = useState(state.sendPageImages !== false);
+  const [slowMode, setSlowMode] = useState(!!state.slowMode);
   const [confirmWipe, setConfirmWipe] = useState(false);
 
   // Live model list fetched directly from the provider, so we're never stuck
@@ -655,13 +698,13 @@ function SettingsModal({ state, setState, onClose, push }){
 
   const save = () => {
     const m = model || modelOptions[0];
-    setState(s=>({ ...s, apiKey: apiKey.trim(), provider, model: m, pagesPerRequest: Number(pagesPerRequest), sendPageImages }));
+    setState(s=>({ ...s, apiKey: apiKey.trim(), provider, model: m, pagesPerRequest: Number(pagesPerRequest), sendPageImages, slowMode }));
     push("Settings saved");
     onClose();
   };
 
   const resetDefaults = () => {
-    setPagesPerRequest(4); setSendPageImages(true);
+    setPagesPerRequest(4); setSendPageImages(true); setSlowMode(false);
     push("Extraction settings reset to defaults");
   };
 
@@ -781,6 +824,23 @@ function SettingsModal({ state, setState, onClose, push }){
           </span>
         </button>
 
+        <button type="button" onClick={()=>setSlowMode(v=>!v)}
+          className="w-full text-left rounded-xl p-4 mt-3 flex items-start gap-3 transition"
+          style={{ border:"1px solid var(--rule)" }}>
+          <span className="w-5 h-5 rounded-md flex items-center justify-center shrink-0 mt-0.5"
+            style={ slowMode ? { background:"var(--gold)", color:"#fff" } : { border:"1px solid var(--rule)" } }>
+            {slowMode && <Icon name="check" size={13} strokeWidth={3} />}
+          </span>
+          <span>
+            <span className="flex items-center gap-1.5 font-semibold text-[14px]">
+              <Icon name="turtle" size={14} /> Go easy on rate limits
+            </span>
+            <span className="block text-xs mt-1 leading-relaxed" style={{ color:"var(--ink-soft)" }}>
+              Free API keys usually only allow a small number of requests per minute. Turn this on if a long PDF keeps skipping lots of pages — it reads one small group at a time with real pauses, instead of several at once.
+            </span>
+          </span>
+        </button>
+
         <div className="rounded-xl p-4 mt-4 flex items-center justify-between flex-wrap gap-2" style={{ border:"1px dashed var(--rule)" }}>
           <div className="flex items-center gap-1.5 text-xs" style={{ color:"var(--ink-soft)" }}>
             <Icon name="hard-drive" size={13} /> {storageLabel} saved on this device
@@ -865,18 +925,19 @@ function UploadScreen({ state, setState, push }){
       const groups = chunk(pages, groupSize);
       const skipped = [];
 
-      // Read up to 3 groups of pages at the same time instead of one after
-      // another — this is the single biggest lever on wall-clock time for a
-      // long document. Each group also gets one automatic retry before it's
-      // counted as a real failure, since a lot of failures are transient.
-      const CONCURRENCY = 3;
+      // Free API keys have real, fairly tight per-minute limits — reading
+      // several page-groups at once can blow straight through them, which
+      // is almost certainly why so many pages got skipped last time. "Go
+      // easy" mode reads one group at a time with real waits between
+      // retries; otherwise a modest amount of overlap.
+      const CONCURRENCY = state.slowMode ? 1 : 2;
       const settled = await runPool(groups, CONCURRENCY, async (group) => {
         return withRetry(async () => {
           const raw = state.provider === "openai"
             ? await callOpenAI({ apiKey: state.apiKey, model: state.model, pages: group, sendImages })
             : await callGemini({ apiKey: state.apiKey, model: state.model, pages: group, sendImages });
           return parseExtractedJSON(raw);
-        }, 1);
+        }, { retries: 3, baseDelayMs: state.slowMode ? 3000 : 1500 });
       }, (done, total) => {
         setStage(total > 1 ? `Scanning questions (${done} of ${total} parts done)...` : "Scanning questions & diagrams...");
       });
@@ -1335,6 +1396,13 @@ function ExamScreen({ state, setState, push, onFinish }){
               {q.section && <span className="text-[11px]" style={{ color:"var(--ink-soft)" }}>{q.section}</span>}
             </div>
 
+            {q.passage && (
+              <div className="rounded-xl p-4 mb-5 text-[14.5px] leading-relaxed" style={{ background:"var(--paper)", border:"1px solid var(--rule)", color:"var(--ink-soft)" }}>
+                <div className="text-[10.5px] font-semibold uppercase tracking-wide mb-1.5" style={{ color:"var(--gold)" }}>Reading passage</div>
+                <MathText text={q.passage} />
+              </div>
+            )}
+
             <div className="serif text-[19px] leading-relaxed mb-6">
               <MathText text={q.questionText} />
             </div>
@@ -1457,7 +1525,7 @@ function BreakdownBars({ title, groups }){
   );
 }
 
-function ResultsScreen({ state, setState, result, push }){
+function ResultsScreen({ state, setState, result, push, onExit }){
   const [tab, setTab] = useState("all");
   const { questions, answers, mode, elapsedTotal } = result;
 
@@ -1489,8 +1557,8 @@ function ResultsScreen({ state, setState, result, push }){
       currentIndex:0, remainingSeconds: mode==="exam" ? (result.config.timerMins*60) : 0, elapsedSeconds:0, startedAt: Date.now(), submittedAt:null
     }}));
   };
-  const newConfig = () => setState(s=>({ ...s, activeTest: null }));
-  const newUpload = () => setState(s=>({ ...s, activeTest: null, bank: null }));
+  const newConfig = () => { onExit(); setState(s=>({ ...s, activeTest: null })); };
+  const newUpload = () => { onExit(); setState(s=>({ ...s, activeTest: null, bank: null })); };
 
   return (
     <div className="max-w-4xl mx-auto px-5 py-10 fade-up">
@@ -1539,6 +1607,11 @@ function ResultsScreen({ state, setState, result, push }){
                   : <span className="px-2 py-0.5 rounded-full" style={{ background:"var(--wrong-soft)", color:"var(--wrong)" }}>Incorrect</span>
                 ) : <span className="px-2 py-0.5 rounded-full" style={{ background:"var(--paper)" }}>Unanswered</span>}
               </div>
+              {g.passage && (
+                <div className="rounded-lg p-3 mb-2 text-[12.5px] leading-relaxed" style={{ background:"var(--paper)", color:"var(--ink-soft)" }}>
+                  <MathText text={g.passage} />
+                </div>
+              )}
               <div className="text-sm mb-2 serif"><MathText text={g.questionText} /></div>
               <div className="text-xs space-y-1">
                 <div style={{ color:"var(--ink-soft)" }}>Your answer: <span className="font-medium" style={{ color: g.answered ? (g.correct?"var(--correct)":"var(--wrong)") : "var(--ink-soft)" }}>{g.selected ? `${g.selected}. ${g.options.find(o=>o.label===g.selected)?.text||""}` : "—"}</span></div>
@@ -1555,14 +1628,14 @@ function ResultsScreen({ state, setState, result, push }){
         </div>
       </div>
 
-      <div className="flex flex-wrap gap-2.5 mt-6">
-        <button onClick={retake} className="flex-1 py-3 rounded-xl text-sm font-semibold flex items-center justify-center gap-2" style={{ background:"var(--ink)", color:"var(--paper)" }}>
+      <div className="flex flex-col sm:flex-row gap-2.5 mt-6">
+        <button onClick={retake} className="sm:flex-1 py-3 rounded-xl text-sm font-semibold flex items-center justify-center gap-2 whitespace-nowrap" style={{ background:"var(--ink)", color:"var(--paper)" }}>
           <Icon name="repeat" size={14} /> Retake test
         </button>
-        <button onClick={newConfig} className="flex-1 py-3 rounded-xl text-sm font-semibold flex items-center justify-center gap-2" style={{ border:"1px solid var(--rule)" }}>
+        <button onClick={newConfig} className="sm:flex-1 py-3 rounded-xl text-sm font-semibold flex items-center justify-center gap-2 whitespace-nowrap" style={{ border:"1px solid var(--rule)" }}>
           <Icon name="sliders-horizontal" size={14} /> Configure new test
         </button>
-        <button onClick={newUpload} className="flex-1 py-3 rounded-xl text-sm font-semibold flex items-center justify-center gap-2" style={{ border:"1px solid var(--rule)" }}>
+        <button onClick={newUpload} className="sm:flex-1 py-3 rounded-xl text-sm font-semibold flex items-center justify-center gap-2 whitespace-nowrap" style={{ border:"1px solid var(--rule)" }}>
           <Icon name="upload" size={14} /> Upload another PDF
         </button>
       </div>
@@ -1633,7 +1706,7 @@ function App(){
   if(state.activeTest && state.activeTest.status === "IN_PROGRESS" && !showResume){
     screen = <ExamScreen state={state} setState={setState} push={push} onFinish={finishTest} />;
   } else if(!state.activeTest && lastResult){
-    screen = <ResultsScreen state={state} setState={setState} result={lastResult} push={push} />;
+    screen = <ResultsScreen state={state} setState={setState} result={lastResult} push={push} onExit={()=>setLastResult(null)} />;
   } else if(!showResume && state.bank){
     screen = <ConfiguratorScreen state={state} setState={setState} push={push} />;
   } else if(!showResume){
