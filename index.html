@@ -193,6 +193,8 @@ const SYSTEM_PROMPT = `Analyze the provided PDF content. Extract all multiple-ch
 If the answer key is at the end of the document, cross-reference question numbers to ensure correct mapping. If no answer key exists, solve the questions and generate accurate explanations.
 Never write a question that only makes sense next to the original page — phrases like "the passage above", "the underlined word", or "in the sentence below" are meaningless once separated from that page, so the full underlying text they refer to MUST be copied into the "passage" field (or inlined into questionText) every time. This matters most for English/comprehension/use-of-English style questions.
 Use consistent, clean subject names every time (e.g. always "English Language", never "ENGLISH LANGUAGE" or "english language" in some places and "English Language" in others) — this document is being read in several small slices, and inconsistent naming across slices will fragment what should be one subject into several.
+A single page sometimes contains the LAST few questions of one subject/year, followed partway down by a new heading banner, followed by the FIRST questions of the next one. Look for this and split correctly at the real boundary — do not label every question on a page with whichever heading happens to be there, since that will wrongly reassign leftover questions from the previous section to the new one.
+If a question's year genuinely cannot be determined even after considering context, use exactly the string "Unknown" — never "Not Specified", "N/A", "Unspecified", or similar variants, so these don't get scattered across several different-looking buckets.
 Note: this is one small slice of a larger document. A subject or year heading (e.g. "PHYSICS", "2021") may have appeared on an earlier page not included here and may not repeat on every page. If a page in this slice doesn't explicitly restate the subject or year, infer the most likely one from context (topic, terminology, question numbering continuing from a prior page) rather than leaving it blank or defaulting to whatever subject you extracted most recently without checking if it still fits.
 Respond with ONLY the JSON object, no markdown fences, no commentary.`;
 
@@ -508,6 +510,11 @@ function parseExtractedJSON(raw){
 function titleCase(str){
   return str.replace(/\S+/g, w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase());
 }
+const UNKNOWN_PLACEHOLDERS = new Set(["unknown","not specified","unspecified","n/a","na","none","not given","not stated","undetermined","tbd","?"]);
+function normalizeYear(raw){
+  const clean = (raw || "Unknown").toString().trim();
+  return UNKNOWN_PLACEHOLDERS.has(clean.toLowerCase()) ? "Unknown" : clean;
+}
 function mergeBanks(banks){
   const title = banks.find(b=>b.title)?.title || "Extracted question bank";
 
@@ -523,7 +530,7 @@ function mergeBanks(banks){
     ...q,
     id: `q${i+1}`,
     subject: canonicalize(q.subject),
-    year: (q.year || "Unknown").toString().trim()
+    year: normalizeYear(q.year)
   }));
 
   const availableSubjects = [...new Set(questions.map(q=>q.subject))].sort();
@@ -626,14 +633,37 @@ async function pdfToPages(file, onProgress, maxPages = 200, renderImages = true)
   return pages;
 }
 
-/* A page whose text looks like a section banner — e.g. "PHYSICS 1983" or
+/* A page whose text contains a section banner — e.g. "PHYSICS 1983" or
    "Mathematics 2001" — almost always means a new subject/year is starting
-   right there. Recognizing this lets extraction start a fresh request
-   exactly at that boundary instead of blindly cutting every N pages, which
-   is what was splitting a heading away from the questions that depend on it. */
+   somewhere on it. Recognizing this lets extraction start a fresh request
+   right at that boundary instead of blindly cutting every N pages.
+   Real past-question PDFs almost always carry a repeating watermark or
+   running header ("Uploaded on www.example.com", a page number, etc.)
+   BEFORE the actual heading on every single page — so this scans a wide
+   window of the page's text rather than assuming the heading is the very
+   first thing on it. */
+const KNOWN_SUBJECTS = [
+  "Mathematics","Further Mathematics","English Language","Use of English","Physics","Chemistry","Biology",
+  "Economics","Government","Geography","Literature in English","Literature","Accounting","Commerce",
+  "Agricultural Science","Christian Religious Studies","Islamic Religious Studies","History","Civic Education",
+  "Computer Studies","Insurance","Bookkeeping","Music","Fine Art","French","Hausa","Igbo","Yoruba",
+  "Technical Drawing","Home Economics","Food and Nutrition"
+];
 function looksLikeSectionHeading(pageText){
-  const head = (pageText || "").trim().replace(/\s+/g, " ").slice(0, 60);
-  return /^[A-Za-z][A-Za-z .&/-]{2,35}\s(19|20)\d{2}\b/.test(head);
+  const text = (pageText || "").replace(/\s+/g, " ").trim();
+  const escaped = KNOWN_SUBJECTS.map(s => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  // A known subject name immediately followed by a year is such a specific,
+  // low-risk pattern that it's safe to search the ENTIRE page for it — the
+  // heading can turn up anywhere, including well past a page's first few
+  // hundred characters (leftover questions from the previous section,
+  // watermarks, etc. can all come before it).
+  const knownSubject = new RegExp(`\\b(${escaped.join("|")})\\b\\s+(19|20)\\d{2}\\b`, "i");
+  if(knownSubject.test(text)) return true;
+  // Fallback for a subject we don't have listed: a short capitalized phrase
+  // immediately followed by a 4-digit year. Less specific, so this one stays
+  // windowed to the early part of the page to keep false positives rare.
+  const generic = /\b[A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+){0,3}\s+(19|20)\d{2}\b/;
+  return generic.test(text.slice(0, 600));
 }
 
 /* Group pages for reading: start a new group right at a detected section
