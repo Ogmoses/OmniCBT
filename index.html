@@ -193,6 +193,7 @@ const SYSTEM_PROMPT = `Extract every multiple-choice question from the past-ques
 }
 Rules:
 - Ignore watermarks, "download more at ...", site URLs, and page numbers entirely — they are not questions and must never appear in your output. If an answer key exists, use it to determine correctOption; otherwise solve each question yourself.
+- LaTeX formatting: every "$" you open MUST have a matching closing "$" — never leave one unclosed. Wrap ONLY the actual symbol/expression in "$...$" (e.g. "$x^2$", "$\theta$", "$\frac{3}{4}$") — never wrap a full sentence or explanatory prose inside "$...$", and never mix plain English words inside math delimiters. In "explanation" especially, keep math and prose clearly separate: short math spans in "$...$", ordinary sentences outside them.
 - The source is often two-column: pages were reordered left-column-top-to-bottom then right-column-top-to-bottom before reaching you, but that reordering can still be imperfect. Use each question's own printed number as the source of truth for grouping its text and options together and for detecting any leftover misordering — never merge two different question numbers' content, and never invent a question number that doesn't appear in the text.
 - A question must be understandable on its own: if it depends on a passage, an underlined word, or "the diagram below", copy that context into "passage" (text) or set "hasDiagram": true (a genuine visual figure/graph/circuit/picture only — never for comprehension or lexis-and-structure, those are text, always false for those).
 - Keep subject and year names clean and identical every time this document is read in (e.g. always "English Language", never "ENGLISH LANGUAGE" sometimes and "English Language" other times) — you are only seeing one small slice of a larger document, and inconsistent naming across slices fragments one real subject into several.
@@ -277,11 +278,11 @@ function fmtTime(sec){
   return h>0 ? `${pad(h)}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`;
 }
 function gradeFor(pct){
-  if(pct>=90) return {label:"A", tone:"var(--correct)"};
-  if(pct>=80) return {label:"B", tone:"var(--correct)"};
-  if(pct>=70) return {label:"C", tone:"var(--gold)"};
-  if(pct>=60) return {label:"D", tone:"var(--gold)"};
-  if(pct>=50) return {label:"E", tone:"var(--wrong)"};
+  if(pct>=70) return {label:"A", tone:"var(--correct)"};
+  if(pct>=60) return {label:"B", tone:"var(--correct)"};
+  if(pct>=50) return {label:"C", tone:"var(--gold)"};
+  if(pct>=45) return {label:"D", tone:"var(--gold)"};
+  if(pct>=40) return {label:"E", tone:"var(--wrong)"};
   return {label:"F", tone:"var(--wrong)"};
 }
 function filterQuestions(bank, subjects, years){
@@ -298,9 +299,50 @@ function shuffle(arr){
   return a;
 }
 
+/* A model-written explanation occasionally has malformed LaTeX: either a
+   "$...$" span that swallows a long run of plain prose (KaTeX then renders
+   the whole thing as "math", silently dropping every space in it — LaTeX
+   ignores whitespace outside explicit spacing commands — so a full sentence
+   reads as one squished-together word and can blow out the page layout),
+   or a "$" that opens but never closes (KaTeX can't find the pair, so it
+   gives up and shows the raw LaTeX source — literal backslash-theta,
+   caret-2, etc. — instead of rendering anything). Both get repaired here,
+   at render time, so this fixes already-saved question banks too, not just
+   future ones. */
+function latexToPlain(str){
+  const superscripts = {"0":"⁰","1":"¹","2":"²","3":"³","4":"⁴","5":"⁵","6":"⁶","7":"⁷","8":"⁸","9":"⁹","-":"⁻","+":"⁺"};
+  return str
+    .replace(/\\left|\\right/g, "")
+    .replace(/\\theta/g, "θ").replace(/\\pi/g, "π").replace(/\\alpha/g, "α").replace(/\\beta/g, "β")
+    .replace(/\\gamma/g, "γ").replace(/\\delta/g, "δ").replace(/\\lambda/g, "λ").replace(/\\mu/g, "μ")
+    .replace(/\\sin/g, "sin").replace(/\\cos/g, "cos").replace(/\\tan/g, "tan").replace(/\\log/g, "log").replace(/\\ln/g, "ln")
+    .replace(/\\sqrt\{([^}]*)\}/g, "√($1)")
+    .replace(/\\frac\{([^}]*)\}\{([^}]*)\}/g, "($1)/($2)")
+    .replace(/\\times/g, "×").replace(/\\div/g, "÷").replace(/\\pm/g, "±")
+    .replace(/\\leq/g, "≤").replace(/\\geq/g, "≥").replace(/\\neq/g, "≠").replace(/\\approx/g, "≈")
+    .replace(/\^\{?(-?[0-9]+)\}?/g, (m,p1) => p1.split("").map(c=>superscripts[c]||c).join(""))
+    .replace(/[{}\\]/g, "");
+}
+function sanitizeMathText(text){
+  if(!text || typeof text !== "string") return text;
+  const dollarCount = (text.match(/\$/g) || []).length;
+  if(dollarCount % 2 !== 0){
+    return latexToPlain(text.replace(/\$/g, ""));
+  }
+  const looksLikeMath = (s) => {
+    if(s.length > 120) return false;
+    const wordyTokens = s.trim().split(/\s+/).filter(w => /^[a-zA-Z]{3,}$/.test(w) && !/^(sin|cos|tan|log|ln|sqrt)$/i.test(w)).length;
+    return wordyTokens <= 6;
+  };
+  return text
+    .replace(/\$\$([\s\S]*?)\$\$/g, (m, inner) => looksLikeMath(inner) ? m : latexToPlain(inner))
+    .replace(/\$([^$]*?)\$/g, (m, inner) => looksLikeMath(inner) ? m : latexToPlain(inner));
+}
+
 /* Render text possibly containing $...$ / $$...$$ LaTeX using KaTeX auto-render */
 function MathText({ text, className }){
   const ref = useRef(null);
+  const safeText = sanitizeMathText(text);
   useEffect(()=>{
     if(ref.current && window.renderMathInElement){
       try{
@@ -313,8 +355,8 @@ function MathText({ text, className }){
         });
       }catch(e){}
     }
-  }, [text]);
-  return <span ref={ref} className={className}>{text}</span>;
+  }, [safeText]);
+  return <span ref={ref} className={`${className||""} break-words`}>{safeText}</span>;
 }
 
 /* Shows the original scanned page(s) a question came from, collapsed by
@@ -612,10 +654,26 @@ function readingOrderText(textContent, pageWidth){
   // If almost everything is on one side, this isn't really a two-column
   // page — just read it as one column in its natural top-to-bottom order.
   if(left.length < items.length * 0.15 || right.length < items.length * 0.15){
-    return items.slice().sort((a,b) => (b.y - a.y) || (a.x - b.x)).map(it=>it.str).join(" ");
+    return cleanExtractedText(items.slice().sort((a,b) => (b.y - a.y) || (a.x - b.x)).map(it=>it.str).join(" "));
   }
   const readTopToBottom = (arr) => arr.slice().sort((a,b) => (b.y - a.y) || (a.x - b.x)).map(it=>it.str).join(" ");
-  return [readTopToBottom(left), readTopToBottom(right)].filter(Boolean).join(" ");
+  return cleanExtractedText([readTopToBottom(left), readTopToBottom(right)].filter(Boolean).join(" "));
+}
+
+/* Word/MathType-generated PDFs (very common source for these compiled
+   past-question documents) often embed a hidden duplicate copy of an
+   equation's text right next to the visible one — e.g. the page literally
+   contains "log102=0.3010log102=0.3010" for one expression. Left in, this
+   garbles math/physics/chemistry content specifically (while plain text
+   subjects like English stay clean), confuses the AI, and was very likely
+   why entire subjects were failing to extract. This strips the invisible
+   markup characters that cause the two copies to not quite byte-match, then
+   collapses any exact run that repeats itself back-to-back. */
+function cleanExtractedText(text){
+  if(!text) return text;
+  let cleaned = text.replace(/[\u00AD\u200B\u200C\u200D\u2060\u2061\u2062\u2063\u2064\uFEFF]/g, "");
+  cleaned = cleaned.replace(/(.{3,120}?)\1+/g, "$1");
+  return cleaned;
 }
 
 /* Render PDF pages to base64 JPEG images (and extract their text) using pdf.js.
@@ -1171,12 +1229,18 @@ function UploadScreen({ state, setState, push }){
       setState(s=>({ ...s, bank, savedBanks: saveBankToHistory(s.savedBanks, bank, file.name) }));
       if(skipped.length > 0){
         // Show the real reason, not just which pages — a vague "had
-        // trouble" is useless for actually diagnosing what went wrong.
-        const sample = skipped[0].message;
-        if(bank.questions.length === 0){
-          setError(`Every page-group failed the same way — this is a real, systemic problem, not a few bad pages. First error seen: ${sample}`);
+        // trouble" was useless for actually diagnosing what went wrong, and
+        // a toast that vanishes in a few seconds isn't much better. Once
+        // more than a third of the document failed, this is very unlikely
+        // to be "a few bad pages" — put the real error(s) on screen
+        // permanently instead of hoping it gets caught in time.
+        const failRate = skipped.length / groups.length;
+        const uniqueMessages = [...new Set(skipped.map(s2 => s2.message))];
+        if(failRate > 0.3){
+          const detail = uniqueMessages.slice(0,3).map((m,i)=>`${i+1}. ${m}`).join("\n");
+          setError(`${skipped.length} of ${groups.length} parts failed (${bank.questions.length} question${bank.questions.length===1?"":"s"} recovered from the rest). This is a systemic problem, not a few bad pages — the real error(s) seen:\n\n${detail}`);
         }else{
-          push(`Found ${bank.questions.length} questions — ${skipped.length} of ${groups.length} parts failed: ${sample}`, { tone:"save", duration: 7000 });
+          push(`Found ${bank.questions.length} questions — ${skipped.length} of ${groups.length} parts failed: ${uniqueMessages[0]}`, { tone:"save", duration: 7000 });
         }
       }else{
         push(`Found ${bank.questions.length} questions`, { tone:"save" });
@@ -1244,7 +1308,7 @@ function UploadScreen({ state, setState, push }){
 
           {error && (
             <div className="mt-4 px-4 py-3 rounded-lg text-sm flex items-start gap-2" style={{ background:"var(--wrong-soft)", color:"var(--wrong)" }}>
-              <Icon name="alert-triangle" size={15} className="mt-0.5 shrink-0" /> <span>{error}</span>
+              <Icon name="alert-triangle" size={15} className="mt-0.5 shrink-0" /> <span className="whitespace-pre-wrap">{error}</span>
             </div>
           )}
 
