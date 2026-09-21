@@ -1125,7 +1125,14 @@ function UploadScreen({ state, setState, push }){
 
       setState(s=>({ ...s, bank, savedBanks: saveBankToHistory(s.savedBanks, bank, file.name) }));
       if(skipped.length > 0){
-        push(`Found ${bank.questions.length} questions — had trouble with ${skipped.map(f=>f.range).join(", ")}, so those were skipped`, { tone:"save", duration: 5000 });
+        // Show the real reason, not just which pages — a vague "had
+        // trouble" is useless for actually diagnosing what went wrong.
+        const sample = skipped[0].message;
+        if(bank.questions.length === 0){
+          setError(`Every page-group failed the same way — this is a real, systemic problem, not a few bad pages. First error seen: ${sample}`);
+        }else{
+          push(`Found ${bank.questions.length} questions — ${skipped.length} of ${groups.length} parts failed: ${sample}`, { tone:"save", duration: 7000 });
+        }
       }else{
         push(`Found ${bank.questions.length} questions`, { tone:"save" });
       }
