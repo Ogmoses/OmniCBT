@@ -811,7 +811,11 @@ function SettingsModal({ state, setState, onClose, push }){
       const list = await fetchAvailableModels(p, key);
       if(list.length === 0) throw new Error("No usable models came back.");
       setLiveModels(list);
-      if(!list.includes(model)) setModel(list[0]);
+      // Deliberately NOT auto-swapping the model here anymore — this used to
+      // silently overwrite whatever you'd picked (even right after saving
+      // it) the moment this list didn't happen to include it, which is
+      // exactly why a choice like Gemini 3.5 Flash Lite kept reverting.
+      // Your selection is only ever changed by you, from here on.
     }catch(e){
       setModelsError(e.message || "Couldn't check right now.");
     }finally{
@@ -819,14 +823,18 @@ function SettingsModal({ state, setState, onClose, push }){
     }
   };
 
-  // Auto-check the moment settings open, if a key is already saved — so
-  // stale/retired model names get caught before you even hit "extract".
+  // Auto-check the moment settings open, if a key is already saved — purely
+  // informational (shows whether your model is confirmed live), never
+  // changes your selection on its own.
   useEffect(()=>{
     if(state.apiKey) checkModels(state.provider, state.apiKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const modelOptions = liveModels || modelsFor(provider);
+  // Whatever is currently selected always stays a valid option in the
+  // dropdown, even if this particular live check didn't happen to return it.
+  const modelOptions = liveModels ? [...new Set([model, ...liveModels])] : modelsFor(provider);
+  const modelConfirmedLive = liveModels && liveModels.includes(model);
 
   const helpFor = (p) => p === "openai"
     ? { url:"https://platform.openai.com/api-keys", host:"platform.openai.com", note:"Requires billing set up on your OpenAI account — usage is billed per request, typically a few cents per PDF." }
@@ -898,9 +906,15 @@ function SettingsModal({ state, setState, onClose, push }){
             {modelOptions.map(m => <option key={m} value={m}>{m}</option>)}
           </select>
           {liveModels ? (
-            <p className="text-xs mt-1.5 flex items-center gap-1" style={{ color:"var(--correct)" }}>
-              <Icon name="check-circle-2" size={11} /> Live list from {provider === "openai" ? "OpenAI" : "Google"} — these definitely exist right now.
-            </p>
+            modelConfirmedLive ? (
+              <p className="text-xs mt-1.5 flex items-center gap-1" style={{ color:"var(--correct)" }}>
+                <Icon name="check-circle-2" size={11} /> Confirmed live from {provider === "openai" ? "OpenAI" : "Google"} — this model definitely exists right now.
+              </p>
+            ) : (
+              <p className="text-xs mt-1.5 flex items-center gap-1" style={{ color:"var(--flag)" }}>
+                <Icon name="alert-triangle" size={11} /> This model didn't show up in your account's live list — it may still work (some models don't always list), or your key may not have access to it yet. Your choice is kept either way.
+              </p>
+            )
           ) : modelsError ? (
             <p className="text-xs mt-1.5 flex items-center gap-1" style={{ color:"var(--wrong)" }}>
               <Icon name="alert-triangle" size={11} /> {modelsError} Showing our best guess below — check again once your key is in.
