@@ -171,7 +171,7 @@ const { useState, useEffect, useRef, useMemo, useCallback } = React;
 const STORAGE_KEY = "omnicbt_state_v1";
 const APP_NAME = "OmniCBT";
 
-const SYSTEM_PROMPT = `Analyze the provided past-question text. Extract all multiple-choice questions, options, correct answers, explanations, years, and subject categories into a structured JSON schema:
+const SYSTEM_PROMPT = `Extract every multiple-choice question from the past-question text below into this JSON schema:
 {
   "title": "Document Title",
   "availableSubjects": ["Subject1", "Subject2"],
@@ -182,23 +182,23 @@ const SYSTEM_PROMPT = `Analyze the provided past-question text. Extract all mult
       "year": "2021",
       "subject": "Physics",
       "section": "Section A",
-      "passage": "If this question depends on a shared reading passage, comprehension text, or a longer sentence with an underlined word, put that full passage/sentence here so the question makes complete sense on its own. Omit this field entirely if the question is self-contained.",
-      "questionText": "Question text here (convert math to LaTeX format like $E=mc^2$)",
+      "passage": "Shared reading passage, comprehension text, or the full sentence containing an underlined word this question depends on — omit if self-contained.",
+      "questionText": "Question text (math as LaTeX, e.g. $E=mc^2$)",
       "options": [{"label": "A", "text": "Option 1"}, {"label": "B", "text": "Option 2"}],
       "correctOption": "A",
-      "explanation": "Detailed step-by-step answer explanation...",
+      "explanation": "Step-by-step answer explanation.",
       "hasDiagram": false
     }
   ]
 }
-If the answer key is at the end of the document, cross-reference question numbers to ensure correct mapping. If no answer key exists, solve the questions and generate accurate explanations.
-Never write a question that only makes sense next to the original page — phrases like "the passage above", "the underlined word", or "in the sentence below" are meaningless once separated from that page, so the full underlying text they refer to MUST be copied into the "passage" field (or inlined into questionText) every time. This matters most for English/comprehension/use-of-English/lexis-and-structure style questions — for these, the text alone is always enough; never mark them as needing a diagram.
-Set "hasDiagram" to true ONLY when the question depends on a genuine visual figure that cannot be represented in text — a geometric figure, a graph, a circuit, a picture — something you can tell is there (labels like "Fig. 1", "the diagram below", coordinates/shapes referenced with no accompanying numeric description) but cannot fully reconstruct from the surrounding text alone. Leave it false for every other question, including ones fully covered by the "passage" field. Most questions should be false; treat true as the exception.
-Use consistent, clean subject names every time (e.g. always "English Language", never "ENGLISH LANGUAGE" or "english language" in some places and "English Language" in others) — this document is being read in several small slices, and inconsistent naming across slices will fragment what should be one subject into several.
-A single page sometimes contains the LAST few questions of one subject/year, followed partway down by a new heading banner, followed by the FIRST questions of the next one. Look for this and split correctly at the real boundary — do not label every question on a page with whichever heading happens to be there, since that will wrongly reassign leftover questions from the previous section to the new one.
-If a question's year genuinely cannot be determined even after considering context, use exactly the string "Unknown" — never "Not Specified", "N/A", "Unspecified", or similar variants, so these don't get scattered across several different-looking buckets.
-Note: this is one small slice of a larger document. A subject or year heading (e.g. "PHYSICS", "2021") may have appeared on an earlier page not included here and may not repeat on every page. If a page in this slice doesn't explicitly restate the subject or year, infer the most likely one from context (topic, terminology, question numbering continuing from a prior page) rather than leaving it blank or defaulting to whatever subject you extracted most recently without checking if it still fits.
-Respond with ONLY the JSON object, no markdown fences, no commentary.`;
+Rules:
+- Ignore watermarks, "download more at ...", site URLs, and page numbers entirely — they are not questions and must never appear in your output. If an answer key exists, use it to determine correctOption; otherwise solve each question yourself.
+- The source is often two-column: pages were reordered left-column-top-to-bottom then right-column-top-to-bottom before reaching you, but that reordering can still be imperfect. Use each question's own printed number as the source of truth for grouping its text and options together and for detecting any leftover misordering — never merge two different question numbers' content, and never invent a question number that doesn't appear in the text.
+- A question must be understandable on its own: if it depends on a passage, an underlined word, or "the diagram below", copy that context into "passage" (text) or set "hasDiagram": true (a genuine visual figure/graph/circuit/picture only — never for comprehension or lexis-and-structure, those are text, always false for those).
+- Keep subject and year names clean and identical every time this document is read in (e.g. always "English Language", never "ENGLISH LANGUAGE" sometimes and "English Language" other times) — you are only seeing one small slice of a larger document, and inconsistent naming across slices fragments one real subject into several.
+- A page can contain the tail of one subject/year followed by a new heading followed by the next one's start — split at the real boundary, don't label a whole page with one heading.
+- If a heading doesn't repeat on this slice, infer subject/year from context (topic, terminology, numbering continuing from before) rather than leaving it blank. If genuinely undeterminable, use exactly "Unknown" (never "Not Specified"/"N/A"/similar).
+- Output ONLY the JSON object — no markdown fences, no commentary.`;
 
 const SAMPLE_BANK = {
   title: "Sample Past Questions — General Science (2019–2021)",
@@ -236,7 +236,7 @@ function saveState(state){
 function defaultState(){
   return {
     apiKey: "", provider:"openai", model: "gpt-4o-mini",
-    pagesPerRequest: 4, slowMode: false,
+    pagesPerRequest: 4, slowMode: false, sendPageImages: false,
     theme: "light",
     bank: null,
     savedBanks: [],
@@ -401,16 +401,14 @@ function ToastStack({ toasts }){
 }
 
 /* ============================== AI CALL ============================== */
-/* Both providers are called text-only now — see the "diagram capture"
-   pass further down for how a specific figure actually gets shown to the
-   person taking the test, without ever needing to send whole pages of
-   images (slow, expensive, and prone to accidentally including an
-   answer-key page) just to read plain question text. */
+/* Text-only by default — proven both faster and more accurate in testing.
+   sendImages is an explicit opt-in for documents that genuinely need it. */
 
-async function callOpenAI({ apiKey, model, pages }){
+async function callOpenAI({ apiKey, model, pages, sendImages }){
   const content = [
-    { type:"text", text: "Extract all questions from the following past-question page text into the JSON schema described in the system prompt:\n\n" + pages.map(p=>`--- Page ${p.pageNumber} ---\n${p.text}`).join("\n\n") }
+    { type:"text", text: "Extract all questions from the following past-question page(s) into the JSON schema described in the system prompt:\n\n" + pages.map(p=>`--- Page ${p.pageNumber} ---\n${p.text}`).join("\n\n") }
   ];
+  if(sendImages) pages.forEach(p => { if(p.image) content.push({ type:"image_url", image_url:{ url: p.image } }); });
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
     method:"POST",
     headers:{ "Content-Type":"application/json", "Authorization":`Bearer ${apiKey}` },
@@ -437,11 +435,12 @@ async function callOpenAI({ apiKey, model, pages }){
   return text;
 }
 
-async function callGemini({ apiKey, model, pages }){
+async function callGemini({ apiKey, model, pages, sendImages }){
   const m = model || "gemini-3.6-flash";
   const parts = [
     { text: SYSTEM_PROMPT + "\n\nPage text:\n\n" + pages.map(p=>`--- Page ${p.pageNumber} ---\n${p.text}`).join("\n\n") }
   ];
+  if(sendImages) pages.forEach(p => { if(p.image) parts.push({ inline_data: { mime_type: "image/jpeg", data: p.image.split(",")[1] } }); });
   const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${apiKey}`, {
     method:"POST",
     headers:{ "Content-Type":"application/json" },
@@ -626,7 +625,7 @@ function readingOrderText(textContent, pageWidth){
    that runs for the whole document, regardless of length. Keeps the pdf.js
    document open (`pdf`) so specific pages can be rendered later, on demand,
    without re-parsing the file from scratch. */
-async function loadPdfPagesText(file, onProgress, maxPages = 200){
+async function loadPdfPagesText(file, onProgress, maxPages = 200, renderImages = false){
   const arrayBuffer = await file.arrayBuffer();
   window.pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
   const pdf = await window.pdfjsLib.getDocument({ data: arrayBuffer }).promise;
@@ -640,7 +639,20 @@ async function loadPdfPagesText(file, onProgress, maxPages = 200){
       const baseViewport = page.getViewport({ scale: 1 });
       text = readingOrderText(textContent, baseViewport.width);
     }catch(e){ /* best-effort */ }
-    pages.push({ pageNumber: i, text });
+    let image = null;
+    if(renderImages){
+      // Optional, off by default: renders and sends a full picture of every
+      // page to the AI instead of just its text. Kept available because some
+      // documents genuinely need it, but this is the slow, expensive path —
+      // text-only has consistently proven both faster and more accurate for
+      // typical typed past-question PDFs.
+      const viewport = page.getViewport({ scale: 1.5 });
+      const canvas = document.createElement("canvas");
+      canvas.width = viewport.width; canvas.height = viewport.height;
+      await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
+      image = canvas.toDataURL("image/jpeg", 0.75);
+    }
+    pages.push({ pageNumber: i, text, image });
     onProgress && onProgress(i, total);
   }
   return { pdf, pages };
@@ -796,6 +808,7 @@ function SettingsModal({ state, setState, onClose, push }){
   const [showHelp, setShowHelp] = useState(false);
   const [pagesPerRequest, setPagesPerRequest] = useState(state.pagesPerRequest || 4);
   const [slowMode, setSlowMode] = useState(!!state.slowMode);
+  const [sendPageImages, setSendPageImages] = useState(!!state.sendPageImages);
   const [confirmWipe, setConfirmWipe] = useState(false);
 
   // Live model list fetched directly from the provider, so we're never stuck
@@ -847,13 +860,13 @@ function SettingsModal({ state, setState, onClose, push }){
 
   const save = () => {
     const m = model || modelOptions[0];
-    setState(s=>({ ...s, apiKey: apiKey.trim(), provider, model: m, pagesPerRequest: Number(pagesPerRequest), slowMode }));
+    setState(s=>({ ...s, apiKey: apiKey.trim(), provider, model: m, pagesPerRequest: Number(pagesPerRequest), slowMode, sendPageImages }));
     push("Settings saved");
     onClose();
   };
 
   const resetDefaults = () => {
-    setPagesPerRequest(4); setSlowMode(false);
+    setPagesPerRequest(4); setSlowMode(false); setSendPageImages(false);
     push("Extraction settings reset to defaults");
   };
 
@@ -965,9 +978,26 @@ function SettingsModal({ state, setState, onClose, push }){
         <div className="rounded-xl p-4 mt-4 flex items-start gap-3" style={{ background:"var(--gold-soft)" }}>
           <Icon name="image" size={15} className="mt-0.5 shrink-0" style={{ color:"var(--gold)" }} />
           <span className="text-xs leading-relaxed" style={{ color:"var(--ink)" }}>
-            <strong>Diagrams are handled automatically.</strong> The app reads every page as fast text first, and only goes back to capture an actual picture for the specific pages a specific question needs — never the whole document, and never a page that looks like an answer key.
+            <strong>Diagrams are handled automatically.</strong> The app reads text first and flags questions that genuinely need a picture, then goes back for just those specific pages — never the whole document, and never a page that looks like an answer key.
           </span>
         </div>
+
+        <button type="button" onClick={()=>setSendPageImages(v=>!v)}
+          className="w-full text-left rounded-xl p-4 mt-3 flex items-start gap-3 transition"
+          style={{ border:"1px solid var(--rule)" }}>
+          <span className="w-5 h-5 rounded-md flex items-center justify-center shrink-0 mt-0.5"
+            style={ sendPageImages ? { background:"var(--gold)", color:"#fff" } : { border:"1px solid var(--rule)" } }>
+            {sendPageImages && <Icon name="check" size={13} strokeWidth={3} />}
+          </span>
+          <span>
+            <span className="flex items-center gap-1.5 font-semibold text-[14px]">
+              <Icon name="eye" size={14} /> Also send page images to the AI
+            </span>
+            <span className="block text-xs mt-1 leading-relaxed" style={{ color:"var(--ink-soft)" }}>
+              Off by default on purpose — <strong>in direct side-by-side testing on real documents, text-only came out both faster and more accurate</strong> than sending images, likely because image requests are far heavier and more likely to hit your API key's rate or size limits, causing more pages to fail. Only turn this on if a specific PDF's text-only result comes out clearly wrong, and expect it to be noticeably slower.
+            </span>
+          </span>
+        </button>
 
         <button type="button" onClick={()=>setSlowMode(v=>!v)}
           className="w-full text-left rounded-xl p-4 mt-3 flex items-start gap-3 transition"
@@ -1063,8 +1093,9 @@ function UploadScreen({ state, setState, push }){
     if(!state.apiKey){ setError("Add your API key first (top right) — it's needed to read the PDF."); return; }
     setError(""); setProcessing(true);
     try{
+      const sendImages = !!state.sendPageImages;
       setStage("Reading PDF pages...");
-      const { pdf, pages } = await loadPdfPagesText(file, (i,total)=> setStage(`Reading page ${i} of ${total}...`));
+      const { pdf, pages } = await loadPdfPagesText(file, (i,total)=> setStage(`Reading page ${i} of ${total}...`), 200, sendImages);
       const groupSize = Math.max(1, Number(state.pagesPerRequest) || 4);
       // Start a fresh request right at a detected "PHYSICS 1983"-style
       // section banner instead of blindly cutting every N pages — that was
@@ -1081,8 +1112,8 @@ function UploadScreen({ state, setState, push }){
       const settled = await runPool(groups, CONCURRENCY, async (group) => {
         return withRetry(async () => {
           const raw = state.provider === "openai"
-            ? await callOpenAI({ apiKey: state.apiKey, model: state.model, pages: group })
-            : await callGemini({ apiKey: state.apiKey, model: state.model, pages: group });
+            ? await callOpenAI({ apiKey: state.apiKey, model: state.model, pages: group, sendImages })
+            : await callGemini({ apiKey: state.apiKey, model: state.model, pages: group, sendImages });
           const parsed = parseExtractedJSON(raw);
           // Tag every question with the real page numbers it came from —
           // driven by our own grouping, not something we have to trust the
