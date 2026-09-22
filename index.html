@@ -504,6 +504,37 @@ async function callGemini({ apiKey, model, pages, sendImages }){
   return text;
 }
 
+async function callAnthropic({ apiKey, model, pages }){
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method:"POST",
+    headers:{
+      "Content-Type":"application/json",
+      "x-api-key": apiKey,
+      "anthropic-version":"2023-06-01",
+      "anthropic-dangerous-direct-browser-access":"true"
+    },
+    body: JSON.stringify({
+      model: model || "claude-sonnet-4-6",
+      max_tokens: 4096,
+      system: SYSTEM_PROMPT,
+      messages:[
+        { role:"user", content: "Extract all questions from the following past-question page(s) into the JSON schema described in the system prompt:\n\n" + pages.map(p=>`--- Page ${p.pageNumber} ---\n${p.text}`).join("\n\n") }
+      ]
+    })
+  });
+  if(!res.ok){
+    const errText = await res.text().catch(()=> "");
+    const err = new Error(`Claude API error (${res.status}): ${errText.slice(0,300)}`);
+    err.status = res.status;
+    err.retryAfter = res.headers.get("retry-after");
+    throw err;
+  }
+  const data = await res.json();
+  const text = (data?.content || []).map(c=>c.text).filter(Boolean).join("");
+  if(!text) throw new Error("No content returned from Claude.");
+  return text;
+}
+
 /* Ask the provider what models actually exist right now, instead of us
    guessing a hardcoded name that they might rename or retire at any time. */
 async function fetchAvailableModels(provider, apiKey){
@@ -519,6 +550,13 @@ async function fetchAvailableModels(provider, apiKey){
       .filter(id => (id.startsWith("gpt-") || id.startsWith("o1") || id.startsWith("o3") || id.startsWith("o4")))
       .filter(id => !exclude.some(x => id.includes(x)))
       .sort();
+  }else if(provider === "anthropic"){
+    const res = await fetch("https://api.anthropic.com/v1/models", {
+      headers:{ "x-api-key": apiKey, "anthropic-version":"2023-06-01", "anthropic-dangerous-direct-browser-access":"true" }
+    });
+    if(!res.ok) throw new Error(`Couldn't list Claude models (${res.status}).`);
+    const data = await res.json();
+    return (data.data || []).map(m => m.id).sort();
   }else{
     const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
     if(!res.ok) throw new Error(`Couldn't list Gemini models (${res.status}).`);
@@ -854,7 +892,7 @@ function Modal({ children, onClose, wide }){
 
 function SettingsModal({ state, setState, onClose, push }){
   const [apiKey, setApiKey] = useState(state.apiKey);
-  const modelsFor = (p) => p === "openai" ? ["gpt-4o-mini","gpt-4o"] : ["gemini-3.6-flash","gemini-2.5-flash"];
+  const modelsFor = (p) => p === "openai" ? ["gpt-4o-mini","gpt-4o"] : p === "anthropic" ? ["claude-sonnet-4-6","claude-haiku-4-5-20251001"] : ["gemini-3.6-flash","gemini-2.5-flash"];
 
   const [provider, setProvider] = useState(state.provider);
   // If a model saved from an older version of this app (e.g. a retired
@@ -909,6 +947,8 @@ function SettingsModal({ state, setState, onClose, push }){
 
   const helpFor = (p) => p === "openai"
     ? { url:"https://platform.openai.com/api-keys", host:"platform.openai.com", note:"Requires billing set up on your OpenAI account — usage is billed per request, typically a few cents per PDF." }
+    : p === "anthropic"
+    ? { url:"https://console.anthropic.com/settings/keys", host:"console.anthropic.com", note:"Requires billing set up (no ongoing free tier like Gemini's) — but a paid key's rate limits are usually far more generous, which can matter a lot for a long document." }
     : { url:"https://aistudio.google.com/apikey", host:"aistudio.google.com", note:"Free to create, no card required, within Google's daily usage limits — the easier option to start with." };
 
   const storageBytes = (() => {
@@ -947,17 +987,17 @@ function SettingsModal({ state, setState, onClose, push }){
           </button>
         </div>
         <p className="text-sm mb-5" style={{ color:"var(--ink-soft)" }}>
-          Calls {provider === "openai" ? "OpenAI" : "Google AI Studio"} from this tab. The key stays in localStorage on this device.
+          Calls {provider === "openai" ? "OpenAI" : provider === "anthropic" ? "Anthropic (Claude)" : "Google AI Studio"} from this tab. The key stays in localStorage on this device.
         </p>
 
         <div className="mb-4">
           <label className="text-xs font-semibold uppercase tracking-wide" style={{ color:"var(--ink-soft)" }}>Provider</label>
           <div className="flex gap-2 mt-2">
-            {["openai","gemini"].map(p=>(
+            {["openai","gemini","anthropic"].map(p=>(
               <button key={p} onClick={()=>{ setProvider(p); setModel(modelsFor(p)[0]); setLiveModels(null); setModelsError(""); if(apiKey) checkModels(p, apiKey); }}
                 className="flex-1 px-3 py-2 rounded-lg text-sm font-medium transition"
                 style={ provider===p ? { background:"var(--ink)", color:"var(--paper)" } : { border:"1px solid var(--rule)" } }>
-                {p === "openai" ? "OpenAI" : "Google Gemini"}
+                {p === "openai" ? "OpenAI" : p === "anthropic" ? "Claude" : "Google Gemini"}
               </button>
             ))}
           </div>
@@ -998,7 +1038,7 @@ function SettingsModal({ state, setState, onClose, push }){
         <div className="mb-5">
           <div className="flex items-center gap-1.5">
             <label className="text-xs font-semibold uppercase tracking-wide" style={{ color:"var(--ink-soft)" }}>
-              {provider === "openai" ? "OpenAI API key" : "Gemini API key"}
+              {provider === "openai" ? "OpenAI API key" : provider === "anthropic" ? "Claude API key" : "Gemini API key"}
             </label>
             <button type="button" onClick={()=>setShowHelp(v=>!v)} aria-label="What is this?"
               className="w-4 h-4 rounded-full flex items-center justify-center shrink-0 transition hover:opacity-70"
@@ -1015,7 +1055,7 @@ function SettingsModal({ state, setState, onClose, push }){
           )}
           <input type="password" value={apiKey} onChange={e=>setApiKey(e.target.value)}
             onBlur={()=>{ if(apiKey && !liveModels) checkModels(provider, apiKey); }}
-            placeholder={provider === "openai" ? "sk-..." : "AIza..."}
+            placeholder={provider === "openai" ? "sk-..." : provider === "anthropic" ? "sk-ant-..." : "AIza..."}
             className="mt-2 w-full px-3 py-2.5 rounded-lg text-sm mono bg-transparent" style={{ border:"1px solid var(--rule)" }} />
         </div>
 
@@ -1171,6 +1211,8 @@ function UploadScreen({ state, setState, push }){
         return withRetry(async () => {
           const raw = state.provider === "openai"
             ? await callOpenAI({ apiKey: state.apiKey, model: state.model, pages: group, sendImages })
+            : state.provider === "anthropic"
+            ? await callAnthropic({ apiKey: state.apiKey, model: state.model, pages: group })
             : await callGemini({ apiKey: state.apiKey, model: state.model, pages: group, sendImages });
           const parsed = parseExtractedJSON(raw);
           // Tag every question with the real page numbers it came from —
