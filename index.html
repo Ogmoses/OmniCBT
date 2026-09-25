@@ -231,7 +231,30 @@ function loadState(){
   }catch(e){ console.error("Failed to load state", e); return null; }
 }
 function saveState(state){
-  try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); return true; }
+  try{
+    // Multiple tabs/sessions of this app can be open against the same
+    // browser storage. Blindly overwriting with whatever's in THIS tab's
+    // memory means a stale tab (still holding an older extraction) can
+    // silently wipe out a newer one saved elsewhere — "last write wins,"
+    // even when last isn't newest. Merge savedBanks with whatever's
+    // already persisted instead of replacing it outright, so a stale
+    // write can never destroy a paper another session already saved.
+    let toSave = state;
+    try{
+      const existingRaw = localStorage.getItem(STORAGE_KEY);
+      if(existingRaw){
+        const existing = JSON.parse(existingRaw);
+        if(Array.isArray(existing.savedBanks) && Array.isArray(state.savedBanks)){
+          const byId = new Map();
+          [...existing.savedBanks, ...state.savedBanks].forEach(entry => { if(entry && entry.id) byId.set(entry.id, entry); });
+          const merged = [...byId.values()].sort((a,b) => (b.savedAt||0) - (a.savedAt||0)).slice(0,5);
+          toSave = { ...state, savedBanks: merged };
+        }
+      }
+    }catch(e){ /* fall back to a plain overwrite below if merge fails */ }
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave));
+    return true;
+  }
   catch(e){ console.error("Failed to save state", e); return false; }
 }
 function defaultState(){
@@ -2016,6 +2039,28 @@ function App(){
         setShowResume(true);
       }
     }
+  }, []);
+
+  // If another tab/window of this app saves newer papers, pick them up
+  // here live — without this, a stale tab that's still open can later
+  // save over that newer data with what it still has in memory.
+  useEffect(()=>{
+    function onStorage(e){
+      if(e.key !== STORAGE_KEY || !e.newValue) return;
+      try{
+        const fresh = JSON.parse(e.newValue);
+        if(Array.isArray(fresh.savedBanks)){
+          setState(s => {
+            const byId = new Map();
+            [...(s.savedBanks||[]), ...fresh.savedBanks].forEach(entry => { if(entry && entry.id) byId.set(entry.id, entry); });
+            const merged = [...byId.values()].sort((a,b) => (b.savedAt||0) - (a.savedAt||0)).slice(0,5);
+            return { ...s, savedBanks: merged };
+          });
+        }
+      }catch(err){ /* ignore malformed cross-tab payloads */ }
+    }
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
   }, []);
 
   // persist on every change (real-time autosave)
