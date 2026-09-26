@@ -247,7 +247,7 @@ function saveState(state){
         if(Array.isArray(existing.savedBanks) && Array.isArray(state.savedBanks)){
           const byId = new Map();
           [...existing.savedBanks, ...state.savedBanks].forEach(entry => { if(entry && entry.id) byId.set(entry.id, entry); });
-          const merged = [...byId.values()].sort((a,b) => (b.savedAt||0) - (a.savedAt||0)).slice(0,5);
+          const merged = trimSavedBanksBySize([...byId.values()]);
           toSave = { ...state, savedBanks: merged };
         }
       }
@@ -269,10 +269,27 @@ function defaultState(){
   };
 }
 
-/* Keep a small library of already-extracted papers so a PDF never has to be
-   re-read from scratch. Newest first, capped so local storage doesn't grow
-   without bound — page images make each saved paper noticeably bigger than
-   before, so this cap is lower than it would otherwise need to be. */
+/* Keep a library of already-extracted papers so a PDF never has to be
+   re-read from scratch. There's no arbitrary count limit — the real
+   constraint is how much a browser will actually let one site store
+   (a few MB, typically), so trimming is based on real size, not a made-up
+   number. The newest paper is always kept even if it alone were somehow
+   over budget; only older ones get dropped, and only once the total
+   genuinely gets close to that limit. */
+const SAVED_BANKS_BUDGET_BYTES = 4 * 1024 * 1024;
+function trimSavedBanksBySize(banks, maxBytes = SAVED_BANKS_BUDGET_BYTES){
+  const sorted = [...(banks || [])].sort((a,b) => (b.savedAt||0) - (a.savedAt||0));
+  const kept = [];
+  let size = 0;
+  for(const entry of sorted){
+    let entrySize = 0;
+    try{ entrySize = new Blob([JSON.stringify(entry)]).size; }catch(e){ entrySize = JSON.stringify(entry).length; }
+    if(size + entrySize > maxBytes && kept.length > 0) break;
+    kept.push(entry);
+    size += entrySize;
+  }
+  return kept;
+}
 function saveBankToHistory(savedBanks, bank, sourceName){
   const entry = {
     id: uid(),
@@ -280,7 +297,7 @@ function saveBankToHistory(savedBanks, bank, sourceName){
     sourceName: sourceName || "Untitled PDF",
     bank
   };
-  return [entry, ...(savedBanks || [])].slice(0, 5);
+  return trimSavedBanksBySize([entry, ...(savedBanks || [])]);
 }
 function timeAgo(ts){
   const s = Math.floor((Date.now() - ts) / 1000);
@@ -2053,7 +2070,7 @@ function App(){
           setState(s => {
             const byId = new Map();
             [...(s.savedBanks||[]), ...fresh.savedBanks].forEach(entry => { if(entry && entry.id) byId.set(entry.id, entry); });
-            const merged = [...byId.values()].sort((a,b) => (b.savedAt||0) - (a.savedAt||0)).slice(0,5);
+            const merged = trimSavedBanksBySize([...byId.values()]);
             return { ...s, savedBanks: merged };
           });
         }
