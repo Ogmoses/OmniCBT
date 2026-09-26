@@ -308,11 +308,18 @@ function trimSavedBanksBySize(banks, maxBytes = SAVED_BANKS_BUDGET_BYTES){
   return kept;
 }
 function saveBankToHistory(savedBanks, bank, sourceName){
+  // Page images are only really worth having for the session you're
+  // actively using right now — keeping them in long-term history as well
+  // means every saved paper's storage cost multiplies by however many
+  // diagrams it has, which adds up fast across several saved papers.
+  // Long-term history keeps the question text (the actual point of "no
+  // need to re-read this PDF") without the images.
+  const { pageThumbs, ...bankWithoutThumbs } = bank;
   const entry = {
     id: uid(),
     savedAt: Date.now(),
     sourceName: sourceName || "Untitled PDF",
-    bank
+    bank: bankWithoutThumbs
   };
   return trimSavedBanksBySize([entry, ...(savedBanks || [])]);
 }
@@ -1319,16 +1326,21 @@ function UploadScreen({ state, setState, push }){
       // Second, much smaller pass: only now, only for questions that were
       // actually flagged as depending on a real diagram, go back and render
       // just those specific pages — never the whole document, and never a
-      // page that reads like an answer key rather than a question.
+      // page that reads like an answer key rather than a question. Capped
+      // regardless of how many questions get flagged, since an over-eager
+      // flag on a long document could otherwise balloon local storage.
+      const MAX_DIAGRAM_PAGES = 20;
       const diagramPages = new Set();
-      bank.questions.forEach(q => {
+      for(const q of bank.questions){
+        if(diagramPages.size >= MAX_DIAGRAM_PAGES) break;
         if(q.hasDiagram && q.sourcePages){
-          q.sourcePages.forEach(pn => {
+          for(const pn of q.sourcePages){
+            if(diagramPages.size >= MAX_DIAGRAM_PAGES) break;
             const pageInfo = pages.find(p => p.pageNumber === pn);
             if(pageInfo && !looksLikeAnswerKeyPage(pageInfo.text)) diagramPages.add(pn);
-          });
+          }
         }
-      });
+      }
       const pageThumbs = {};
       if(diagramPages.size > 0){
         setStage(`Capturing ${diagramPages.size} diagram${diagramPages.size>1?"s":""}...`);
