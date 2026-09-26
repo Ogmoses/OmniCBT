@@ -231,31 +231,48 @@ function loadState(){
   }catch(e){ console.error("Failed to load state", e); return null; }
 }
 function saveState(state){
+  // Multiple tabs/sessions of this app can be open against the same
+  // browser storage. Blindly overwriting with whatever's in THIS tab's
+  // memory means a stale tab (still holding an older extraction) can
+  // silently wipe out a newer one saved elsewhere — "last write wins,"
+  // even when last isn't newest. Merge savedBanks with whatever's
+  // already persisted instead of replacing it outright, so a stale
+  // write can never destroy a paper another session already saved.
+  let toSave = state;
   try{
-    // Multiple tabs/sessions of this app can be open against the same
-    // browser storage. Blindly overwriting with whatever's in THIS tab's
-    // memory means a stale tab (still holding an older extraction) can
-    // silently wipe out a newer one saved elsewhere — "last write wins,"
-    // even when last isn't newest. Merge savedBanks with whatever's
-    // already persisted instead of replacing it outright, so a stale
-    // write can never destroy a paper another session already saved.
-    let toSave = state;
-    try{
-      const existingRaw = localStorage.getItem(STORAGE_KEY);
-      if(existingRaw){
-        const existing = JSON.parse(existingRaw);
-        if(Array.isArray(existing.savedBanks) && Array.isArray(state.savedBanks)){
-          const byId = new Map();
-          [...existing.savedBanks, ...state.savedBanks].forEach(entry => { if(entry && entry.id) byId.set(entry.id, entry); });
-          const merged = trimSavedBanksBySize([...byId.values()]);
-          toSave = { ...state, savedBanks: merged };
-        }
+    const existingRaw = localStorage.getItem(STORAGE_KEY);
+    if(existingRaw){
+      const existing = JSON.parse(existingRaw);
+      if(Array.isArray(existing.savedBanks) && Array.isArray(state.savedBanks)){
+        const byId = new Map();
+        [...existing.savedBanks, ...state.savedBanks].forEach(entry => { if(entry && entry.id) byId.set(entry.id, entry); });
+        const merged = trimSavedBanksBySize([...byId.values()]);
+        toSave = { ...state, savedBanks: merged };
       }
-    }catch(e){ /* fall back to a plain overwrite below if merge fails */ }
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave));
-    return true;
+    }
+  }catch(e){ /* fall back to a plain overwrite below if merge fails */ }
+
+  // The browser's real, hard storage limit can be stricter than our own
+  // soft 4MB budget above (this varies by device and is out of our
+  // control). A save must never be all-or-nothing: if the full write is
+  // rejected, that must NOT take the current session — the active bank,
+  // an in-progress test — down with it just because history didn't fit.
+  // Retry with progressively less history, oldest first, before giving up.
+  let banks = Array.isArray(toSave.savedBanks) ? toSave.savedBanks.slice() : [];
+  for(let attempt = 0; attempt <= banks.length; attempt++){
+    const attemptState = { ...toSave, savedBanks: banks };
+    try{
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(attemptState));
+      return true;
+    }catch(e){
+      if(banks.length === 0){
+        console.error("Failed to save state even with no saved-paper history kept:", e);
+        return false;
+      }
+      banks = banks.slice(0, -1); // drop the oldest (list is newest-first) and retry
+    }
   }
-  catch(e){ console.error("Failed to save state", e); return false; }
+  return false;
 }
 function defaultState(){
   return {
@@ -276,7 +293,7 @@ function defaultState(){
    number. The newest paper is always kept even if it alone were somehow
    over budget; only older ones get dropped, and only once the total
    genuinely gets close to that limit. */
-const SAVED_BANKS_BUDGET_BYTES = 4 * 1024 * 1024;
+const SAVED_BANKS_BUDGET_BYTES = 2 * 1024 * 1024;
 function trimSavedBanksBySize(banks, maxBytes = SAVED_BANKS_BUDGET_BYTES){
   const sorted = [...(banks || [])].sort((a,b) => (b.savedAt||0) - (a.savedAt||0));
   const kept = [];
