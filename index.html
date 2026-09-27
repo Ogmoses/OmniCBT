@@ -293,7 +293,7 @@ function defaultState(){
    number. The newest paper is always kept even if it alone were somehow
    over budget; only older ones get dropped, and only once the total
    genuinely gets close to that limit. */
-const SAVED_BANKS_BUDGET_BYTES = 2 * 1024 * 1024;
+const SAVED_BANKS_BUDGET_BYTES = 3.5 * 1024 * 1024;
 function trimSavedBanksBySize(banks, maxBytes = SAVED_BANKS_BUDGET_BYTES){
   const sorted = [...(banks || [])].sort((a,b) => (b.savedAt||0) - (a.savedAt||0));
   const kept = [];
