@@ -193,7 +193,8 @@ const SYSTEM_PROMPT = `Extract every multiple-choice question from the past-ques
 }
 Rules:
 - Ignore watermarks, "download more at ...", site URLs, and page numbers entirely — they are not questions and must never appear in your output. If an answer key exists, use it to determine correctOption; otherwise solve each question yourself.
-- LaTeX formatting: every "$" you open MUST have a matching closing "$" — never leave one unclosed. Wrap ONLY the actual symbol/expression in "$...$" (e.g. "$x^2$", "$\theta$", "$\frac{3}{4}$") — never wrap a full sentence or explanatory prose inside "$...$", and never mix plain English words inside math delimiters. In "explanation" especially, keep math and prose clearly separate: short math spans in "$...$", ordinary sentences outside them.
+- LaTeX formatting: every "$" you open MUST have a matching closing "$" — never leave one unclosed. Wrap ONLY the actual symbol/expression in "$...$" (e.g. "$x^2$", "$\\theta$", "$\\frac{3}{4}$") — never wrap a full sentence or explanatory prose inside "$...$", and never mix plain English words inside math delimiters. In "explanation" especially, keep math and prose clearly separate: short math spans in "$...$", ordinary sentences outside them.
+- Currency and special symbols: write them as the actual character (₦, £, €, °, ×, ÷, ≤, ≥), never as an escape code like \\u20a6 — a backslash-u sequence in your output shows up as broken literal text. Nigerian past questions often have the Naira sign ₦ extracted as a plain "N" or "n" in front of an amount (e.g. "n 7,200" or "N12,500"); when a bare N/n clearly stands for money, write it as ₦.
 - The source is often two-column: pages were reordered left-column-top-to-bottom then right-column-top-to-bottom before reaching you, but that reordering can still be imperfect. Use each question's own printed number as the source of truth for grouping its text and options together and for detecting any leftover misordering — never merge two different question numbers' content, and never invent a question number that doesn't appear in the text.
 - A question must be understandable on its own: if it depends on a passage, an underlined word, or "the diagram below", copy that context into "passage" (text) or set "hasDiagram": true (a genuine visual figure/graph/circuit/picture only — never for comprehension or lexis-and-structure, those are text, always false for those).
 - Keep subject and year names clean and identical every time this document is read in (e.g. always "English Language", never "ENGLISH LANGUAGE" sometimes and "English Language" other times) — you are only seeing one small slice of a larger document, and inconsistent naming across slices fragments one real subject into several.
@@ -387,8 +388,26 @@ function latexToPlain(str){
     .replace(/\^\{?(-?[0-9]+)\}?/g, (m,p1) => p1.split("").map(c=>superscripts[c]||c).join(""))
     .replace(/[{}\\]/g, "");
 }
+/* Two separate, well-known ways a currency/special symbol arrives broken:
+   1. The AI writes the symbol as an escape code (e.g. the Naira sign as
+      "\u20a6") but double-escapes it inside its JSON, so instead of being
+      decoded to the real character it survives as literal backslash-u text.
+      Any literal \uXXXX left in plain text is safe to decode.
+   2. In Nigerian past-question PDFs the Naira sign (₦) very often gets
+      extracted as a plain letter "N"/"n" (an old-font encoding quirk), so a
+      price reads "n 7,200" instead of "₦7,200". A bare n/N directly in
+      front of a comma-grouped number is, in this genre of document,
+      essentially always a lost Naira sign — narrow enough not to touch
+      things like "n = 5" or "N is the total". */
+function fixSymbolGlitches(str){
+  if(!str || typeof str !== "string") return str;
+  return str
+    .replace(/\\u([0-9a-fA-F]{4})/g, (m, hex) => String.fromCharCode(parseInt(hex, 16)))
+    .replace(/(^|[^A-Za-z0-9])[nN]\s?(\d{1,3}(?:,\d{3})+(?:\.\d+)?)\b/g, "$1₦$2");
+}
 function sanitizeMathText(text){
   if(!text || typeof text !== "string") return text;
+  text = fixSymbolGlitches(text);
   const dollarCount = (text.match(/\$/g) || []).length;
   if(dollarCount % 2 !== 0){
     return latexToPlain(text.replace(/\$/g, ""));
