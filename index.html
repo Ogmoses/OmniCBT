@@ -29,15 +29,15 @@
 <script id="lib-pdfjs" src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js" onload="__markLoad('pdfjs')" onerror="__markFail('pdfjs', this.src)"></script>
 
 <!-- React -->
-<script id="lib-react" src="https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js" onload="__markLoad('react')" onerror="__markFail('react', this.src)"></script>
-<script id="lib-reactdom" src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js" onload="__markLoad('react-dom')" onerror="__markFail('react-dom', this.src)"></script>
-<script id="lib-babel" src="https://cdn.jsdelivr.net/npm/@babel/standalone/babel.min.js" onload="__markLoad('babel')" onerror="__markFail('babel', this.src)"></script>
+<script id="lib-react" src="https://cdn.jsdelivr.net/npm/react@18.3.1/umd/react.production.min.js" onload="__markLoad('react')" onerror="__markFail('react', this.src)"></script>
+<script id="lib-reactdom" src="https://cdn.jsdelivr.net/npm/react-dom@18.3.1/umd/react-dom.production.min.js" onload="__markLoad('react-dom')" onerror="__markFail('react-dom', this.src)"></script>
+<script id="lib-babel" src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.26.10/babel.min.js" onload="__markLoad('babel')" onerror="__markFail('babel', this.src)"></script>
 
 <!-- Lucide -->
 <script id="lib-lucide" src="https://cdn.jsdelivr.net/npm/lucide@0.363.0/dist/umd/lucide.js" onload="__markLoad('lucide')" onerror="__markFail('lucide', this.src)"></script>
 
 <!-- Tailwind (play CDN) -->
-<script id="lib-tailwind" src="https://cdn.tailwindcss.com" onload="__markLoad('tailwind')" onerror="__markFail('tailwind', this.src)"></script>
+<script id="lib-tailwind" src="https://cdn.tailwindcss.com/3.4.17" onload="__markLoad('tailwind')" onerror="__markFail('tailwind', this.src)"></script>
 
 <style>
   :root{
@@ -2194,7 +2194,7 @@ ReactDOM.createRoot(document.getElementById("root")).render(<App />);
       try{
         var src = document.getElementById("app-source").textContent;
         if(typeof Babel === "undefined") throw new Error("Babel did not load — cannot compile the app.");
-        var compiled = Babel.transform(src, { presets: ["react"] }).code;
+        var compiled = Babel.transform(src, { presets: [["react", { runtime: "classic" }]] }).code;
         (0, eval)(compiled);
       }catch(err){
         showFatal("The app code failed to compile or run.", (err && err.message) + (err && err.stack ? ("\n\n" + err.stack) : ""));
